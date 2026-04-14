@@ -4,48 +4,35 @@ import asyncio
 import copy
 import random
 import re
+import threading
 import time
-from threading import Lock
-from typing import Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import discord
-from api_client import get as api_get, post as api_post
+from discord.ext import commands
+
+from BotR import api_client
 from Data import data_user
 
-MAX_ROUNDS = 30
-ACTION_DELAY = 2
-MAX_LOG_LINES = 12
-LOVE_DROP_RATE = 0.10
-COOLDOWN_HOURS = 8
-
-MAX_HP_CAP = 5000
-MAX_DMG_CAP = 500
-MAX_SPEED_CAP = 200
-
-HEAL_ON_CRIT_CHANCE = 0.20
-COMBO_CRIT_CHANCE = 0.25
-CRIT_HEAL_MIN = 0.10
-CRIT_HEAL_MAX = 0.14
-CRIT_HEAL_COMBO_MIN = 0.14
-CRIT_HEAL_COMBO_MAX = 0.20
+# =========================================================
+# fight.py (API mode)
+# - No direct JSON access
+# - Uses BotR/api_client.py for inventory/waifu/team/cooldown
+# - Keeps public entrypoint: fight_logic(ctx, opponent)
+# =========================================================
 
 INV_LOCK = asyncio.Lock()
-GOLD_LOCK = asyncio.Lock()
 BATTLE_STATE_LOCK = asyncio.Lock()
-COOLDOWN_LOCK = Lock()
+COOLDOWN_LOCK = threading.RLock()
 
 ACTIVE_BATTLE_USERS: Set[str] = set()
 COOLDOWNS: Dict[str, float] = {}
 COOLDOWNS_LOADED = False
 
-RANK_ORDER = [
-    "limited",
-    "toi_thuong",
-    "truyen_thuyet",
-    "huyen_thoai",
-    "anh_hung",
-    "thuong",
-]
+COOLDOWN_HOURS = 6
+MAX_ROUNDS = 20
+ACTION_DELAY = 1.5
+LOVE_DROP_RATE = 0.20
 
 RANK_STATS = {
     "thuong": (100, 10, 5),
@@ -75,6 +62,19 @@ LIFESTEAL_BASE = {
 }
 
 
+# =========================================================
+# API wrappers
+# =========================================================
+async def api_get(path: str) -> Dict[str, Any]:
+    data = await api_client.get(path)
+    return data if isinstance(data, dict) else {}
+
+
+async def api_post(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    data = await api_client.post(path, payload)
+    return data if isinstance(data, dict) else {}
+
+
 async def load_inventory_db() -> Dict[str, Any]:
     data = await api_get("/inventory")
     return data if isinstance(data, dict) else {}
@@ -92,6 +92,7 @@ async def load_team_db() -> Dict[str, Any]:
 
 async def ensure_cooldowns_loaded():
     global COOLDOWNS_LOADED, COOLDOWNS
+
     if COOLDOWNS_LOADED:
         return
 
@@ -110,14 +111,13 @@ async def ensure_cooldowns_loaded():
 
     with COOLDOWN_LOCK:
         COOLDOWNS = out
-
-    COOLDOWNS_LOADED = True
+        COOLDOWNS_LOADED = True
 
 
 async def save_cooldowns_to_api():
     with COOLDOWN_LOCK:
         snapshot = dict(COOLDOWNS)
-    await api_post("/cooldown/bulk_replace", {"data": snapshot})
+    await api_client.set_cooldown(snapshot)
 
 
 def get_user_obj(ctx):
@@ -166,95 +166,30 @@ async def edit_like(msg, content=None, embed=None, view=None):
         if view is not None:
             kwargs["view"] = view
         return await msg.edit(**kwargs)
-    except Exception as e:
-        print(f"[fight.py] edit_like error: {e}")
+    except Exception:
         return None
 
 
-def normalize_team(team):
-    if isinstance(team, list):
-        return [str(x) for x in team if isinstance(x, (str, int))]
-    if isinstance(team, dict):
-        return [str(v) for v in team.values() if isinstance(v, (str, int))]
-    return []
-
-
-def get_team_source(team_data, uid):
-    user_data = team_data.get(str(uid), team_data.get(uid, {}))
-
-    if isinstance(user_data, list):
-        return list(user_data)
-
-    if not isinstance(user_data, dict):
-        return []
-
-    for key in ("team", "waifus", "members", "list"):
-        value = user_data.get(key)
-        if isinstance(value, list):
-            return list(value)
-
-    return []
-
-
-def normalize_team_ids(inv, uid, team_data=None):
-    team_data = team_data or {}
-    source = get_team_source(team_data, uid)
-
-    user = inv.get(str(uid), {})
-    waifus = user.get("waifus", {})
-
+# =========================================================
+# Inventory / team helpers
+# =========================================================
+def _ensure_waifus_dict(user_inv: Dict[str, Any]) -> Dict[str, Any]:
+    waifus = user_inv.get("waifus")
+    if isinstance(waifus, dict):
+        return waifus
     if isinstance(waifus, list):
-        waifus = {str(w): 0 for w in waifus}
-
-    if not source:
-        default_id = user.get("default_waifu")
-        if isinstance(default_id, (str, int)):
-            source = [default_id]
-        elif isinstance(waifus, dict):
-            source = list(waifus.keys())
-
-    out = []
-    seen = set()
-
-    for wid in source:
-        if not isinstance(wid, (str, int)):
-            continue
-        wid = str(wid)
-
-        if wid in seen:
-            continue
-
-        if isinstance(waifus, dict) and wid in waifus:
-            out.append(wid)
-            seen.add(wid)
-
-        if len(out) >= 3:
-            break
-
-    return out
+        converted = {str(w): 0 for w in waifus}
+        user_inv["waifus"] = converted
+        return converted
+    user_inv["waifus"] = {}
+    return user_inv["waifus"]
 
 
-def _ensure_waifus_dict(user_record: dict) -> dict:
-    waifus = user_record.get("waifus", {})
-    if isinstance(waifus, list):
-        waifus = {str(w): 0 for w in waifus}
-        user_record["waifus"] = waifus
-    elif not isinstance(waifus, dict):
-        waifus = {}
-        user_record["waifus"] = waifus
-    return waifus
-
-
-def get_love(inv, uid, wid):
+def get_love(inv: Dict[str, Any], uid: str, wid: str) -> int:
     uid = str(uid)
     wid = str(wid)
-
-    user = inv.get(uid, {})
-    waifus = user.get("waifus", {})
-
-    if isinstance(waifus, list):
-        waifus = {str(w): 0 for w in waifus}
-
+    user = inv.setdefault(uid, {})
+    waifus = _ensure_waifus_dict(user)
     val = waifus.get(wid, 0)
 
     if isinstance(val, dict):
@@ -266,16 +201,14 @@ def get_love(inv, uid, wid):
         return 0
 
 
-def set_love(inv, uid, wid, val):
+def set_love(inv: Dict[str, Any], uid: str, wid: str, val: int):
     uid = str(uid)
     wid = str(wid)
-
     user = inv.setdefault(uid, {})
     waifus = _ensure_waifus_dict(user)
-
     current = waifus.get(wid)
-    new_val = max(0, int(val))
 
+    new_val = max(0, int(val))
     if isinstance(current, dict):
         current["love"] = new_val
         if "amount" in current:
@@ -284,18 +217,98 @@ def set_love(inv, uid, wid, val):
         waifus[wid] = new_val
 
 
-def drop_love(inv, uid, wid):
+def drop_love(inv: Dict[str, Any], uid: str, wid: str):
     old = get_love(inv, uid, wid)
     new = max(0, int(old * (1 - LOVE_DROP_RATE)))
     set_love(inv, uid, wid, new)
     return new
 
 
-def fmt_pct(value: float) -> str:
-    try:
-        return f"{max(0.0, float(value)) * 100:.0f}%"
-    except Exception:
-        return "0%"
+def normalize_team_ids(inv: Dict[str, Any], uid: str, team_db: Dict[str, Any]) -> List[str]:
+    uid = str(uid)
+    user_inv = inv.get(uid, {})
+    if not isinstance(user_inv, dict):
+        return []
+
+    candidates = user_inv.get("team")
+    if not candidates:
+        candidates = user_inv.get("selected_team")
+    if not candidates:
+        candidates = user_inv.get("battle_team")
+    if not candidates:
+        candidates = team_db.get(uid)
+
+    out: List[str] = []
+
+    if isinstance(candidates, list):
+        for x in candidates:
+            if x is None:
+                continue
+            out.append(str(x))
+    elif isinstance(candidates, dict):
+        for k, v in candidates.items():
+            if isinstance(v, (str, int)):
+                out.append(str(v))
+            elif isinstance(k, (str, int)):
+                out.append(str(k))
+
+    if not out:
+        waifus = user_inv.get("waifus", {})
+        if isinstance(waifus, dict):
+            out = [str(k) for k in list(waifus.keys())[:3]]
+
+    seen = set()
+    uniq: List[str] = []
+    for wid in out:
+        if wid not in seen:
+            uniq.append(wid)
+            seen.add(wid)
+
+    return uniq[:3]
+
+
+def build_char(uid: str, wid: str, inv: Dict[str, Any], waifu_db: Dict[str, Any]) -> Dict[str, Any]:
+    uid = str(uid)
+    wid = str(wid)
+    record = waifu_db.get(wid, {})
+    if not isinstance(record, dict):
+        record = {}
+
+    rank = str(record.get("rank", "thuong")).lower().strip()
+    base_hp, base_damage, base_speed = RANK_STATS.get(rank, RANK_STATS["thuong"])
+    love = get_love(inv, uid, wid)
+
+    hp_bonus = min(120, love // 4)
+    dmg_bonus = min(40, love // 10)
+    spd_bonus = min(15, love // 25)
+
+    max_hp = max(1, base_hp + hp_bonus)
+    damage = max(1, base_damage + dmg_bonus)
+    speed = max(1, base_speed + spd_bonus)
+
+    crit = min(0.40, CRIT_BASE.get(rank, 0.04) + (love / 2000))
+    lifesteal = min(0.25, LIFESTEAL_BASE.get(rank, 0.02) + (love / 3000))
+
+    name = record.get("name") or record.get("Name") or f"Waifu {wid}"
+    image = record.get("image") or record.get("Image") or ""
+    bio = record.get("Bio") or record.get("bio") or ""
+
+    return {
+        "uid": uid,
+        "wid": wid,
+        "name": str(name),
+        "rank": rank,
+        "love": love,
+        "max_hp": max_hp,
+        "hp": max_hp,
+        "damage": damage,
+        "speed": speed,
+        "crit_chance": crit,
+        "lifesteal": lifesteal,
+        "alive": True,
+        "image": image,
+        "bio": bio,
+    }
 
 
 def hp_bar(current, max_hp, length=10):
@@ -306,20 +319,41 @@ def hp_bar(current, max_hp, length=10):
     return "█" * filled + "░" * (length - filled)
 
 
-def team_text(team: List[dict]) -> str:
-    if not team:
-        return "Không có waifu."
-
-    out = []
-    for c in team:
-        hp = max(0, int(c.get("hp", 0)))
-        max_hp = max(1, int(c.get("max_hp", 1)))
-        out.append(
-            f"**{c.get('name', '???')}** | HP: `{hp}/{max_hp}` `{hp_bar(hp, max_hp)}` "
-        )
-    return "\n".join(out)
+def fmt_pct(value: float) -> str:
+    try:
+        return f"{max(0.0, float(value)) * 100:.0f}%"
+    except Exception:
+        return "0%"
 
 
+def get_dodge_chance(attacker_speed: int, defender_speed: int) -> float:
+    diff = max(-20, min(20, int(defender_speed) - int(attacker_speed)))
+    return max(0.03, min(0.30, 0.10 + diff * 0.01))
+
+
+def get_crit_damage(base_damage: int, is_combo: bool) -> int:
+    return int(base_damage * (2.0 if is_combo else 1.5))
+
+
+def get_crit_heal_amount(max_hp: int, is_combo: bool) -> int:
+    return int(max_hp * (0.20 if is_combo else 0.12))
+
+
+def get_gold_rate_by_turn(t: int) -> float:
+    if t <= 3:
+        return 0.10
+    if t <= 6:
+        return 0.12
+    if t <= 10:
+        return 0.15
+    if t <= 15:
+        return 0.18
+    return 0.20
+
+
+# =========================================================
+# Cooldown helpers
+# =========================================================
 def _battle_key(uid1: str, uid2: str) -> str:
     return "|".join(sorted((str(uid1), str(uid2))))
 
@@ -350,156 +384,13 @@ def is_on_cooldown(uid1: str, uid2: str) -> Tuple[bool, int]:
 
 async def set_cooldown(uid1: str, uid2: str, hours: int = COOLDOWN_HOURS):
     with COOLDOWN_LOCK:
-        now = time.time()
-
-        expired = [k for k, expiry in COOLDOWNS.items() if expiry <= now]
-        for k in expired:
-            COOLDOWNS.pop(k, None)
-
-        if len(COOLDOWNS) > 2000:
-            COOLDOWNS.clear()
-
-        key = _battle_key(uid1, uid2)
-        COOLDOWNS[key] = now + hours * 3600
-
+        COOLDOWNS[_battle_key(uid1, uid2)] = time.time() + hours * 3600
     await save_cooldowns_to_api()
 
 
-def get_gold_rate_by_turn(t):
-    t = max(1, int(t))
-
-    if t == 1:
-        return random.uniform(0.50, 0.60)
-    if t <= 4:
-        return random.uniform(0.30, 0.40)
-    if t <= 7:
-        return random.uniform(0.20, 0.30)
-    if t <= 10:
-        return random.uniform(0.10, 0.20)
-    if t >= MAX_ROUNDS:
-        return random.uniform(0.01, 0.03)
-    return random.uniform(0.01, 0.05)
-
-
-async def transfer_gold_safely(winner_uid: str, loser_uid: str, bonus: int) -> int:
-    bonus = max(0, int(bonus))
-    if bonus <= 0:
-        return 0
-
-    async with GOLD_LOCK:
-        try:
-            loser_data = await data_user.get_user_data(loser_uid)
-            loser_gold = int((loser_data or {}).get("gold", 0))
-        except Exception as e:
-            print(f"[fight.py] get_user gold error: {e}")
-            loser_gold = 0
-
-        amount = min(loser_gold, bonus)
-        if amount <= 0:
-            return 0
-
-        try:
-            removed = await data_user.remove_gold(loser_uid, amount)
-            if not removed:
-                return 0
-        except Exception as e:
-            print(f"[fight.py] remove_gold error: {e}")
-            return 0
-
-        try:
-            await data_user.add_gold(winner_uid, amount)
-            return amount
-        except Exception as e:
-            print(f"[fight.py] add_gold error: {e}")
-            try:
-                await data_user.add_gold(loser_uid, amount)
-            except Exception as restore_error:
-                print(f"[fight.py] rollback gold error: {restore_error}")
-            return 0
-
-
-def get_battle_crit_chance(rank: str, love: int, level: int) -> float:
-    base = CRIT_BASE.get(rank, 0.04)
-    bonus_level = max(0, int(level) - 1) * 0.01
-    bonus_love = min(0.05, max(0, int(love)) / 2000.0)
-    return min(0.30, base + bonus_level + bonus_love)
-
-
-def get_lifesteal(rank: str, level: int) -> float:
-    base = LIFESTEAL_BASE.get(rank, 0.02)
-    bonus = min(0.10, max(0, int(level) - 1) * 0.005)
-    return min(0.20, base + bonus)
-
-
-def get_dodge_chance(attacker_speed: int, defender_speed: int) -> float:
-    attacker_speed = max(1, int(attacker_speed))
-    defender_speed = max(1, int(defender_speed))
-    base = 0.05
-    bonus = min(0.20, defender_speed / max(1, attacker_speed * 12))
-    return min(0.25, base + bonus)
-
-
-def get_crit_damage(base_damage: int, is_combo: bool = False) -> int:
-    base_damage = max(1, int(base_damage))
-    if is_combo:
-        return max(1, int(base_damage * random.uniform(1.40, 1.50)))
-    return max(1, int(base_damage * random.uniform(1.30, 1.35)))
-
-
-def get_crit_heal_amount(max_hp: int, is_combo: bool = False) -> int:
-    max_hp = max(1, int(max_hp))
-    if is_combo:
-        return max(1, int(max_hp * random.uniform(CRIT_HEAL_COMBO_MIN, CRIT_HEAL_COMBO_MAX)))
-    return max(1, int(max_hp * random.uniform(CRIT_HEAL_MIN, CRIT_HEAL_MAX)))
-
-
-def build_char(uid, wid, inv, waifu):
-    if not isinstance(wid, (str, int)):
-        return None
-
-    uid = str(uid)
-    wid = str(wid)
-
-    meta = waifu.get(wid, {}) if isinstance(waifu, dict) else {}
-    rank = str(meta.get("rank", "thuong")).lower()
-    if rank not in RANK_ORDER:
-        rank = "thuong"
-
-    love = get_love(inv, uid, wid)
-    level = max(1, love // 100 + 1)
-
-    base_hp, base_dmg, base_spd = RANK_STATS.get(rank, RANK_STATS["thuong"])
-
-    max_hp = base_hp + level * 20 + love // 10
-    damage = base_dmg + level * 5 + love // 25
-    speed = base_spd + level * 2 + love // 20
-
-    max_hp = min(MAX_HP_CAP, max(1, max_hp))
-    damage = min(MAX_DMG_CAP, max(1, damage))
-    speed = min(MAX_SPEED_CAP, max(1, speed))
-
-    crit_chance = get_battle_crit_chance(rank, love, level)
-    lifesteal = get_lifesteal(rank, level)
-
-    name = meta.get("name") or meta.get("display_name") or wid
-
-    return {
-        "uid": uid,
-        "wid": wid,
-        "name": name,
-        "rank": rank,
-        "love": love,
-        "level": level,
-        "hp": max_hp,
-        "max_hp": max_hp,
-        "damage": damage,
-        "speed": speed,
-        "crit_chance": crit_chance,
-        "lifesteal": lifesteal,
-        "alive": True,
-    }
-
-
+# =========================================================
+# View
+# =========================================================
 class SpeedView(discord.ui.View):
     def __init__(self, session, timeout: Optional[float] = None):
         super().__init__(timeout=timeout)
@@ -515,19 +406,20 @@ class SpeedView(discord.ui.View):
 
         self.add_item(self.btn_x1)
         self.add_item(self.btn_x2)
-        self.refresh_buttons()
 
     def refresh_buttons(self):
+        for item in self.children:
+            if isinstance(item, discord.ui.Button):
+                item.disabled = False
+
+        self.btn_x1.label = "x1"
+        self.btn_x2.label = "x2"
+
         if self.session.delay <= 1:
             self.btn_x2.disabled = True
-            self.btn_x2.style = discord.ButtonStyle.green
-            self.btn_x1.disabled = False
-            self.btn_x1.style = discord.ButtonStyle.gray
         else:
-            self.btn_x1.disabled = True
-            self.btn_x1.style = discord.ButtonStyle.green
+            self.btn_x1.disabled = False
             self.btn_x2.disabled = False
-            self.btn_x2.style = discord.ButtonStyle.gray
 
     def disable_all(self):
         for item in self.children:
@@ -592,6 +484,9 @@ class SpeedView(discord.ui.View):
                 print(f"[fight.py] view timeout edit error: {e}")
 
 
+# =========================================================
+# Fight session
+# =========================================================
 class FightSession:
     def __init__(self, ctx, uid1, uid2, ta, tb, inv, waifu, na, nb):
         self.ctx = ctx
@@ -599,7 +494,6 @@ class FightSession:
         self.uid2 = str(uid2)
         self.na = na
         self.nb = nb
-
         self.inv = inv
         self.waifu = waifu
 
@@ -607,57 +501,37 @@ class FightSession:
         self.tb = [c for c in (build_char(self.uid2, w, inv, waifu) for w in tb) if isinstance(c, dict)]
 
         self.turn = 1
-        self.logs: List[str] = []
         self.delay = ACTION_DELAY
         self.finished = False
         self.sudden_death_applied = False
-
         self.love_drop_targets: Set[Tuple[str, str]] = set()
+        self.logs: List[str] = []
 
-    def alive(self, team):
-        return [c for c in team if c["alive"] and c["hp"] > 0]
+        # Simple nickname cleanup for display only
+        for c in self.ta + self.tb:
+            c["hp"] = int(c["max_hp"])
+            c["alive"] = True
 
-    def log(self, txt):
-        self.logs.append(txt)
-        if len(self.logs) > MAX_LOG_LINES:
-            self.logs = self.logs[-MAX_LOG_LINES:]
+    def log(self, text: str):
+        self.logs.append(str(text))
+        if len(self.logs) > 12:
+            self.logs = self.logs[-12:]
 
     def mark_love_drop(self, uid: str, wid: str):
         self.love_drop_targets.add((str(uid), str(wid)))
 
-    def render(self):
-        mode = "x2" if self.delay <= 1 else "x1"
-        e = discord.Embed(
-            title=f"The battle giữa {self.na} và {self.nb}",
-            color=discord.Color.red(),
-        )
-        e.add_field(
-            name=f"🔴 {self.na}",
-            value=team_text(self.ta)[:1000] or "Không có waifu.",
-            inline=True,
-        )
-        e.add_field(
-            name=f"🔵 {self.nb}",
-            value=team_text(self.tb)[:1000] or "Không có waifu.",
-            inline=True,
-        )
-        e.add_field(
-            name="Diễn biến",
-            value="\n".join(self.logs)[:1000] or "Chưa có diễn biến.",
-            inline=False,
-        )
-        e.set_footer(text=f"Turn {min(self.turn, MAX_ROUNDS)}/{MAX_ROUNDS} | Mode {mode}")
-        return e
+    def alive(self, team: List[dict]) -> List[dict]:
+        return [c for c in team if c.get("alive", True) and int(c.get("hp", 0)) > 0]
+
+    def is_over(self):
+        return not (self.alive(self.ta) and self.alive(self.tb))
 
     def choose_attacker(self, side: str) -> Optional[dict]:
         team = self.ta if side == "a" else self.tb
         alive = self.alive(team)
         if not alive:
             return None
-        if len(alive) == 1:
-            return alive[0]
-        weights = [max(1, c["speed"]) for c in alive]
-        return random.choices(alive, weights=weights, k=1)[0]
+        return random.choice(alive)
 
     def choose_defender(self, side: str) -> Optional[dict]:
         enemy = self.tb if side == "a" else self.ta
@@ -672,9 +546,6 @@ class FightSession:
     def get_side_id(self, side: str) -> str:
         return self.uid1 if side == "a" else self.uid2
 
-    def is_over(self):
-        return not (self.alive(self.ta) and self.alive(self.tb))
-
     def winner(self):
         a = self.alive(self.ta)
         b = self.alive(self.tb)
@@ -688,29 +559,47 @@ class FightSession:
         if self.sudden_death_applied:
             return
         self.sudden_death_applied = True
+        for c in self.alive(self.ta) + self.alive(self.tb):
+            cut = max(1, int(c["max_hp"] * 0.15))
+            c["hp"] = max(1, int(c["hp"]) - cut)
+        self.log("⚡ SUDDEN DEATH kích hoạt!")
 
-        for team in (self.ta, self.tb):
-            for c in self.alive(team):
-                loss = max(1, int(c["max_hp"] * 0.20))
-                c["hp"] = max(0, c["hp"] - loss)
-                self.log(f"☠️ SUDDEN DEATH: {c['name']} mất {loss} HP!")
+    def render(self):
+        emb = discord.Embed(
+            title="⚔️ Fight",
+            description=f"**{self.na}** vs **{self.nb}**\nTurn: **{self.turn}/{MAX_ROUNDS}**",
+            color=discord.Color.red(),
+        )
 
-                if c["hp"] <= 0 and c["alive"]:
-                    c["alive"] = False
-                    old_love = get_love(self.inv, c["uid"], c["wid"])
-                    new_love = drop_love(self.inv, c["uid"], c["wid"])
-                    self.mark_love_drop(c["uid"], c["wid"])
-                    self.log(f"💔 {c['name']} bị hạ bởi sudden death. Love giảm từ {old_love} còn {new_love}.")
+        def team_block(team: List[dict]) -> str:
+            if not team:
+                return "Không có waifu."
+            rows = []
+            for c in team:
+                rows.append(
+                    f"**{c['name']}** [{c['rank']}] | HP `{int(c['hp'])}/{int(c['max_hp'])}` `{hp_bar(c['hp'], c['max_hp'])}`"
+                )
+            return "\n".join(rows)
+
+        emb.add_field(name=self.na, value=team_block(self.ta), inline=False)
+        emb.add_field(name=self.nb, value=team_block(self.tb), inline=False)
+
+        if self.logs:
+            emb.add_field(name="Log", value="\n".join(self.logs[-8:]), inline=False)
+
+        emb.set_footer(text=f"Delay x{2 if self.delay >= 2 else 1} | Cooldown {COOLDOWN_HOURS}h")
+        return emb
 
     async def attack(self, msg, attacker: dict, defender: dict, view: SpeedView):
         if not attacker or not defender:
             return
+
         if attacker["hp"] <= 0 or defender["hp"] <= 0:
             return
 
         dodge_chance = get_dodge_chance(attacker["speed"], defender["speed"])
         if random.random() < dodge_chance:
-            self.log(f"💨 {defender['name']} né đòn của {attacker['name']}!")
+            self.log(f"🌀 {defender['name']} né đòn của {attacker['name']}!")
             await edit_like(msg, embed=self.render(), view=view)
             await asyncio.sleep(self.delay)
             return
@@ -719,22 +608,20 @@ class FightSession:
         base_damage = max(1, base_damage)
 
         is_crit = random.random() < attacker["crit_chance"]
-        is_combo = is_crit and random.random() < COMBO_CRIT_CHANCE
+        is_combo = is_crit and random.random() < 0.25
 
-        if is_crit and random.random() < HEAL_ON_CRIT_CHANCE:
+        if is_crit and random.random() < 0.20:
             heal = get_crit_heal_amount(attacker["max_hp"], is_combo)
             start_hp = attacker["hp"]
             attacker["hp"] = min(attacker["max_hp"], attacker["hp"] + heal)
             actual = attacker["hp"] - start_hp
-
             if actual > 0:
                 if is_combo:
-                    self.log(f"✨🔥 {attacker['name']} COMBO HEAL hồi {actual} HP!")
+                    self.log(f"✨ {attacker['name']} COMBO HEAL hồi {actual} HP!")
                 else:
                     self.log(f"✨ {attacker['name']} hồi {actual} HP nhờ chí mạng!")
             else:
                 self.log(f"✨ {attacker['name']} kích hoạt hồi máu nhưng HP đã đầy.")
-
             await edit_like(msg, embed=self.render(), view=view)
             await asyncio.sleep(self.delay)
             return
@@ -745,7 +632,7 @@ class FightSession:
         defender["hp"] = max(0, defender["hp"] - damage)
 
         if is_crit and is_combo:
-            self.log(f"🔥 {attacker['name']} COMBO CRIT {defender['name']} gây {damage} dame!")
+            self.log(f"💥 {attacker['name']} COMBO CRIT {defender['name']} gây {damage} dame!")
         elif is_crit:
             self.log(f"💥 {attacker['name']} CRIT {defender['name']} gây {damage} dame!")
         else:
@@ -762,7 +649,6 @@ class FightSession:
             int(attacker["max_hp"] * 0.25),
             int(damage * attacker.get("lifesteal", 0)),
         )
-
         if heal > 0 and attacker["hp"] > 0 and attacker["hp"] < attacker["max_hp"]:
             start_hp = attacker["hp"]
             attacker["hp"] = min(attacker["max_hp"], attacker["hp"] + heal)
@@ -784,27 +670,23 @@ class FightSession:
 
         speed_a = sum(c["speed"] for c in self.alive(self.ta))
         speed_b = sum(c["speed"] for c in self.alive(self.tb))
+
         roll_a = speed_a + random.randint(0, max(1, speed_a // 5 + 1))
         roll_b = speed_b + random.randint(0, max(1, speed_b // 5 + 1))
-
         order = ("a", "b") if roll_a >= roll_b else ("b", "a")
 
         for side in order:
             if self.is_over():
                 break
-
             attacker = self.choose_attacker(side)
             defender = self.choose_defender(side)
-
             if not attacker or not defender:
                 continue
-
             await self.attack(msg, attacker, defender, view)
 
     async def play(self, msg):
         view = SpeedView(self, timeout=max(300, MAX_ROUNDS * (ACTION_DELAY + 5)))
         view.message = msg
-
         await edit_like(msg, embed=self.render(), view=view)
 
         while not self.is_over() and self.turn <= MAX_ROUNDS:
@@ -814,7 +696,6 @@ class FightSession:
         self.finished = True
         view.disable_all()
         await edit_like(msg, embed=self.render(), view=view)
-
         return view
 
     async def commit(self):
@@ -854,7 +735,6 @@ class FightSession:
                         current_love = 0
 
                     new_love = max(0, int(current_love * (1 - LOVE_DROP_RATE)))
-
                     if isinstance(waifus.get(wid), dict):
                         waifus[wid]["love"] = new_love
                         if "amount" in waifus[wid]:
@@ -862,13 +742,16 @@ class FightSession:
                     else:
                         waifus[wid] = new_love
 
-                await api_post(f"/inventory/{uid}/update", {"data": {"waifus": waifus}})
                 user_inv["waifus"] = waifus
                 latest_all[uid] = user_inv
+                await api_client.post(f"/inventory/{uid}/update", user_inv)
 
             self.inv = latest_all
 
 
+# =========================================================
+# Public entrypoint
+# =========================================================
 def _resolve_opponent(opponent):
     if opponent is None:
         return None, None
@@ -886,6 +769,23 @@ def _resolve_opponent(opponent):
         return uid, name
 
     return None, None
+
+
+async def transfer_gold_safely(winner: str, loser: str, amount: int) -> bool:
+    amount = max(0, int(amount))
+    if amount <= 0:
+        return True
+
+    ok_remove = await data_user.remove_gold(str(loser), amount)
+    if not ok_remove:
+        return False
+
+    ok_add = await data_user.add_gold(str(winner), amount)
+    if not ok_add:
+        await data_user.add_gold(str(loser), amount)
+        return False
+
+    return True
 
 
 async def fight_logic(ctx, opponent):
@@ -915,6 +815,7 @@ async def fight_logic(ctx, opponent):
     async with BATTLE_STATE_LOCK:
         if uid1 in ACTIVE_BATTLE_USERS or uid2 in ACTIVE_BATTLE_USERS:
             return await send_like(ctx, content="⏳ Đang trong trận khác")
+
         ACTIVE_BATTLE_USERS.add(uid1)
         ACTIVE_BATTLE_USERS.add(uid2)
 
@@ -968,14 +869,10 @@ async def fight_logic(ctx, opponent):
 
             result_embed = discord.Embed(
                 title="Kết quả",
-                description=f"🤝 Trận chiến giữa {user_name} và {opponent_name} đã kết thúc với tỉ số hòa.",
+                description=f"Trận chiến giữa {user_name} và {opponent_name} đã kết thúc với tỉ số hòa.",
                 color=discord.Color.gold(),
             )
-            result_embed.add_field(
-                name="Phần thưởng",
-                value="Không có gold.",
-                inline=False,
-            )
+            result_embed.add_field(name="Phần thưởng", value="Không có gold.", inline=False)
             result_embed.set_footer(text=f"Turn hoàn thành: {t} | Cooldown {COOLDOWN_HOURS}h")
 
             await edit_like(msg, content=None, embed=result_embed, view=None)
@@ -985,7 +882,7 @@ async def fight_logic(ctx, opponent):
         loser = uid2 if win == "a" else uid1
 
         try:
-            loser_data = await data_user.get_user_data(loser)
+            loser_data = await api_client.get_user_data(loser)
             loser_gold = int((loser_data or {}).get("gold", 0))
         except Exception:
             loser_gold = 0
@@ -1001,22 +898,18 @@ async def fight_logic(ctx, opponent):
 
         result_embed = discord.Embed(
             title="Kết quả",
-            description=f"🏆 {win_name} chiến thắng trước {lose_name}!",
+            description=f"🏆 **{win_name}** đã chiến thắng **{lose_name}**.",
             color=discord.Color.green(),
         )
-        result_embed.add_field(
-            name="Phần thưởng",
-            value=f"💰 +{transferred} gold ({int(rate * 100)}% từ gold của đối thủ)",
-            inline=False,
-        )
+        reward_text = f"{bonus} gold"
+        if bonus > 0:
+            reward_text += " (đã chuyển)"
+        if not transferred:
+            reward_text += " — chuyển thất bại, nhưng trận đấu vẫn hoàn tất."
+        result_embed.add_field(name="Phần thưởng", value=reward_text, inline=False)
         result_embed.set_footer(text=f"Turn hoàn thành: {t} | Cooldown {COOLDOWN_HOURS}h")
 
-        await edit_like(
-            msg,
-            content=f"🏆 <@{winner}> thắng!\n💰 +{transferred} gold",
-            embed=result_embed,
-            view=None,
-        )
+        await edit_like(msg, content=None, embed=result_embed, view=None)
 
     finally:
         async with BATTLE_STATE_LOCK:
@@ -1024,8 +917,21 @@ async def fight_logic(ctx, opponent):
             ACTIVE_BATTLE_USERS.discard(uid2)
 
 
+# =========================================================
+# Cog / command
+# =========================================================
+class FightCog(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+
+    @commands.command(name="fight", aliases=["f", "chien"])
+    async def fight_cmd(self, ctx, *, opponent=None):
+        if not opponent:
+            return await send_like(ctx, content="❌ Dùng: `.fight @user`")
+
+        await fight_logic(ctx, opponent)
+
+
 async def setup(bot):
-    return None
-
-
-print("Loaded fight has success")
+    await bot.add_cog(FightCog(bot))
+    print("Loaded fight has success")

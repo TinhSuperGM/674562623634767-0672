@@ -4,7 +4,7 @@ import asyncio
 import inspect
 import random
 from datetime import datetime, timedelta
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Dict, Optional
 
 import discord
 
@@ -12,7 +12,7 @@ from api_client import get as api_get
 from api_client import post as api_post
 
 try:
-    from Data.level import sync_all  # nếu bạn đã đổi module này sang API thì vẫn dùng được
+    from Data.level import sync_all
 except Exception:
     async def sync_all():
         return None
@@ -80,6 +80,7 @@ locks: Dict[str, asyncio.Lock] = {}
 
 
 def get_lock(uid: str) -> asyncio.Lock:
+    uid = str(uid)
     if uid not in locks:
         locks[uid] = asyncio.Lock()
     return locks[uid]
@@ -104,21 +105,13 @@ async def _maybe_await(value):
     return value
 
 
-async def _api_get_first(paths: list[str]):
-    for path in paths:
-        data = await api_get(path)
-        if data is not None:
-            return data
-    return None
-
-
 async def _load_user(uid: str) -> Dict[str, Any]:
     data = await api_get(f"/users/{uid}")
     return data if isinstance(data, dict) else {}
 
 
-async def _patch_user(uid: str, patch: Dict[str, Any]) -> bool:
-    res = await api_post(f"/users/{uid}/update", {"data": patch})
+async def _save_user(uid: str, user_data: Dict[str, Any]) -> bool:
+    res = await api_post(f"/users/{uid}/update", user_data)
     return bool(res and res.get("success"))
 
 
@@ -132,8 +125,8 @@ async def _load_inventory(uid: str) -> Dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-async def _patch_inventory(uid: str, patch: Dict[str, Any]) -> bool:
-    res = await api_post(f"/inventory/{uid}/update", {"data": patch})
+async def _save_inventory(uid: str, inv_data: Dict[str, Any]) -> bool:
+    res = await api_post(f"/inventory/{uid}/update", inv_data)
     return bool(res and res.get("success"))
 
 
@@ -142,16 +135,13 @@ async def _load_waifu_data() -> Dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-async def _load_level(uid: str) -> Dict[str, Any]:
-    data = await _api_get_first([f"/level/{uid}", f"/levels/{uid}"])
+async def _load_level_store() -> Dict[str, Any]:
+    data = await api_get("/data/level")
     return data if isinstance(data, dict) else {}
 
 
-async def _patch_level(uid: str, patch: Dict[str, Any]) -> bool:
-    res = await api_post(f"/level/{uid}/update", {"data": patch})
-    if res and res.get("success"):
-        return True
-    res = await api_post(f"/levels/{uid}/update", {"data": patch})
+async def _save_level_store(level_data: Dict[str, Any]) -> bool:
+    res = await api_post("/data/level/update", level_data)
     return bool(res and res.get("success"))
 
 
@@ -492,7 +482,8 @@ async def _flush_pending_reward_locked(bot, users: Dict[str, Any], uid: str, tar
         else:
             pending["credited"] = True
 
-        await _patch_user(uid, {"work_reward_pending": pending})
+        user["work_reward_pending"] = pending
+        await _save_user(uid, user)
         users[uid] = await _load_user(uid)
         user = users[uid]
 
@@ -505,11 +496,11 @@ async def _flush_pending_reward_locked(bot, users: Dict[str, Any], uid: str, tar
 
         pending["sent"] = True
         user.pop("work_reward_pending", None)
-        await _patch_user(uid, {"work_reward_pending": None})
+        await _save_user(uid, user)
         return payload
 
     user.pop("work_reward_pending", None)
-    await _patch_user(uid, {"work_reward_pending": None})
+    await _save_user(uid, user)
     return payload
 
 
@@ -529,7 +520,8 @@ async def _settle_job_locked(bot, users: Dict[str, Any], inv: Dict[str, Any], wa
     area_key = str(job.get("area"))
     area_cfg = WORK_AREAS.get(area_key)
     if not area_cfg:
-        await _patch_user(uid, {"work_job": None})
+        user["work_job"] = None
+        await _save_user(uid, user)
         return None
 
     default_id = str(job.get("default_id", "unknown"))
@@ -555,33 +547,35 @@ async def _settle_job_locked(bot, users: Dict[str, Any], inv: Dict[str, Any], wa
         love_after = max(1, love_before - love_loss)
         _set_love(inv, uid, default_id, love_after)
 
-    # update user and inventory via API
-    user_patch = {
-        "work_job": None,
-        "last_work": job.get("started_at", datetime.now().isoformat()),
-        "work_reward_pending": {
-            "area": area_key,
-            "rank": rank_str,
-            "level": level,
-            "default_id": default_id,
-            "love_before": love_before,
-            "love_after": love_after,
-            "love_loss": love_loss,
-            "base_gold": base_gold,
-            "gold": gold,
-            "bonus_hit": bonus_hit,
-            "failed": failed,
-            "channel_id": job.get("channel_id"),
-            "user_name": job.get("user_name"),
-            "completed_at": datetime.now().isoformat(),
-            "credited": False if not failed else True,
-            "sent": False,
-        },
+    pending = {
+        "area": area_key,
+        "rank": rank_str,
+        "level": level,
+        "default_id": default_id,
+        "love_before": love_before,
+        "love_after": love_after,
+        "love_loss": love_loss,
+        "base_gold": base_gold,
+        "gold": gold,
+        "bonus_hit": bonus_hit,
+        "failed": failed,
+        "channel_id": job.get("channel_id"),
+        "user_name": job.get("user_name"),
+        "completed_at": datetime.now().isoformat(),
+        "credited": False if not failed else True,
+        "sent": False,
     }
-    inv_patch = {"waifus": inv.get(uid, {}).get("waifus", {})}
 
-    await _patch_user(uid, user_patch)
-    await _patch_inventory(uid, inv_patch)
+    user_patch = dict(user)
+    user_patch["work_job"] = None
+    user_patch["last_work"] = job.get("started_at", datetime.now().isoformat())
+    user_patch["work_reward_pending"] = pending
+
+    inv_patch = dict(inv.get(uid, {}))
+    inv_patch["waifus"] = inv.get(uid, {}).get("waifus", {})
+
+    await _save_user(uid, user_patch)
+    await _save_inventory(uid, inv_patch)
 
     users[uid] = await _load_user(uid)
     inv[uid] = await _load_inventory(uid)
@@ -589,7 +583,7 @@ async def _settle_job_locked(bot, users: Dict[str, Any], inv: Dict[str, Any], wa
     return await _flush_pending_reward_locked(bot, users, uid, target=target)
 
 
-# ===== START JOB =====
+# ===== START JOB / SHOW STATUS =====
 async def _start_job_locked(target, users: Dict[str, Any], inv: Dict[str, Any], levels: Dict[str, Any], waifu_data: Dict[str, Any], uid: str, area_key: str):
     user = _get_user(users, uid)
 
@@ -658,12 +652,11 @@ async def _start_job_locked(target, users: Dict[str, Any], inv: Dict[str, Any], 
         "user_name": getattr(getattr(target, "user", None), "display_name", None) if hasattr(target, "user") else getattr(target, "display_name", uid),
     }
 
-    user_patch = {
-        "work_job": job,
-        "last_work": now.isoformat(),
-    }
+    user_patch = dict(user)
+    user_patch["work_job"] = job
+    user_patch["last_work"] = now.isoformat()
 
-    await _patch_user(uid, user_patch)
+    await _save_user(uid, user_patch)
     users[uid] = await _load_user(uid)
 
     pending_embed = build_working_embed(
@@ -718,56 +711,121 @@ class WorkView(discord.ui.View):
     async def handle_area(self, interaction: discord.Interaction, area_key: str):
         lock = get_lock(self.owner_id)
         async with lock:
-            users = {}
-            inv = {}
-            levels = {}
-            waifu_data = {}
-
             user_data = await _load_user(self.owner_id)
             inv_data = await _load_inventory(self.owner_id)
-            level_data = await _load_level(self.owner_id)
+            level_data = await _load_level_store()
             waifu_data = await _load_waifu_data()
 
-            users[self.owner_id] = user_data
-            inv[self.owner_id] = inv_data
-            levels[self.owner_id] = level_data
+            users = {self.owner_id: user_data}
+            inv = {self.owner_id: inv_data}
+            levels = {self.owner_id: level_data if isinstance(level_data, dict) else {}}
 
-            ok, result = await _start_job_locked(interaction, users, inv, levels, waifu_data, self.owner_id, area_key)
+            if isinstance(user_data.get("work_reward_pending"), dict):
+                payload = await _flush_pending_reward_locked(BOT, users, self.owner_id, target=interaction)
+                if payload:
+                    return
+                await _reply(interaction, content="⏳ Đang xử lý phần thưởng cũ, thử lại sau vài giây.", ephemeral=True)
+                return
 
-            if not ok:
-                if isinstance(result, discord.Embed):
-                    try:
-                        await interaction.response.edit_message(embed=result, view=None)
-                    except Exception:
-                        try:
-                            await interaction.followup.send(embed=result, ephemeral=True)
-                        except Exception:
-                            pass
+            active_job = user_data.get("work_job")
+            if _is_job_active(active_job):
+                if _job_ready(active_job):
+                    payload = await _settle_job_locked(BOT, users, inv, waifu_data, self.owner_id, target=interaction)
+                    if payload:
+                        return
+                    await _reply(interaction, content="❌ Có lỗi khi nhận thưởng, hãy thử lại.", ephemeral=True)
+                    return
+
+                remain = _remaining_to_claim(active_job) or timedelta(0)
+                embed = build_working_embed(
+                    getattr(interaction.user, "display_name", self.owner_id),
+                    f"<@{self.owner_id}>",
+                    active_job,
+                    remain,
+                )
+                try:
+                    if not interaction.response.is_done():
+                        await interaction.response.edit_message(embed=embed, view=None)
+                    else:
+                        await interaction.followup.send(embed=embed, ephemeral=False)
+                except Exception:
+                    pass
+                return
+
+            default_id = inv_data.get("default_waifu")
+            if not default_id:
+                await _reply(interaction, content="❌ Bạn chưa có waifu để đi làm.", ephemeral=True)
+                return
+
+            waifus = inv_data.get("waifus")
+            if not _waifu_exists(waifus, default_id):
+                await _reply(interaction, content="❌ Waifu mặc định không hợp lệ.", ephemeral=True)
+                return
+
+            rank_str = _get_rank(default_id, waifu_data)
+            if not rank_str:
+                await _reply(interaction, content="❌ Waifu này chưa có dữ liệu trong waifu_data.json.", ephemeral=True)
+                return
+
+            try:
+                await _maybe_await(sync_all())
+            except Exception as e:
+                print(f"[work.sync_all] {e}")
+
+            level = _get_level(levels, self.owner_id, default_id)
+            love_point = _get_love(inv, self.owner_id, default_id)
+
+            area_cfg = WORK_AREAS.get(area_key)
+            if not area_cfg:
+                await _reply(interaction, content="❌ Khu vực không hợp lệ.", ephemeral=True)
+                return
+
+            if level < area_cfg["unlock"]:
+                await _reply(interaction, content=f"🔒 Khu vực **{area_cfg['label']}** cần level **{area_cfg['unlock']}**.", ephemeral=True)
+                return
+
+            now = datetime.now()
+            last_work = _cooldown_end(user_data)
+            if last_work and now < last_work + WORK_COOLDOWN:
+                remain = (last_work + WORK_COOLDOWN) - now
+                await _reply(interaction, content=f"⏳ Hãy chờ **{_format_remaining(remain)}** nữa!", ephemeral=True)
+                return
+
+            job = {
+                "active": True,
+                "area": area_key,
+                "default_id": default_id,
+                "rank": rank_str,
+                "level": level,
+                "love_before": love_point,
+                "started_at": now.isoformat(),
+                "claim_at": (now + WORK_DURATION).isoformat(),
+                "channel_id": str(interaction.channel_id) if interaction.channel_id else None,
+                "user_name": getattr(interaction.user, "display_name", self.owner_id),
+            }
+
+            user_patch = dict(user_data)
+            user_patch["work_job"] = job
+            user_patch["last_work"] = now.isoformat()
+
+            await _save_user(self.owner_id, user_patch)
+
+            embed = build_working_embed(
+                getattr(interaction.user, "display_name", self.owner_id),
+                f"<@{self.owner_id}>",
+                job,
+                WORK_DURATION,
+            )
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.edit_message(embed=embed, view=None)
                 else:
-                    await _reply(interaction, content=str(result), ephemeral=True)
-                return
-
-            if isinstance(result, discord.Embed):
+                    await interaction.followup.send(embed=embed, ephemeral=False)
+            except Exception:
                 try:
-                    await interaction.response.edit_message(embed=result, view=None)
+                    await interaction.followup.send(embed=embed, ephemeral=False)
                 except Exception:
-                    try:
-                        await interaction.followup.send(embed=result, ephemeral=False)
-                    except Exception:
-                        pass
-                return
-
-            if isinstance(result, dict):
-                try:
-                    await interaction.response.edit_message(content="💼 Công việc đã hoàn tất.", view=None)
-                except Exception:
-                    try:
-                        await interaction.followup.send(content="💼 Công việc đã hoàn tất.", ephemeral=False)
-                    except Exception:
-                        pass
-                return
-
-            await _reply(interaction, content="💼 Đã bắt đầu làm việc!", ephemeral=False)
+                    pass
 
     async def on_timeout(self):
         for item in self.children:
@@ -785,31 +843,31 @@ async def work_loop():
 
     while not BOT.is_closed():
         try:
-            # chỉ kiểm tra danh sách user hiện tại
             users_all = await api_get("/users")
             if isinstance(users_all, dict):
                 for uid in list(users_all.keys()):
-                    lock = get_lock(str(uid))
+                    uid = str(uid)
+                    lock = get_lock(uid)
                     if lock.locked():
                         continue
 
                     async with lock:
-                        fresh_user = await _load_user(str(uid))
+                        fresh_user = await _load_user(uid)
                         if not isinstance(fresh_user, dict):
                             continue
 
                         if isinstance(fresh_user.get("work_reward_pending"), dict):
-                            users = {str(uid): fresh_user}
-                            await _flush_pending_reward_locked(BOT, users, str(uid))
+                            users = {uid: fresh_user}
+                            await _flush_pending_reward_locked(BOT, users, uid)
                             continue
 
                         job = fresh_user.get("work_job")
                         if _is_job_active(job) and _job_ready(job):
-                            fresh_inv = await _load_inventory(str(uid))
+                            fresh_inv = await _load_inventory(uid)
                             fresh_waifu = await _load_waifu_data()
-                            users = {str(uid): fresh_user}
-                            inv = {str(uid): fresh_inv}
-                            await _settle_job_locked(BOT, users, inv, fresh_waifu, str(uid))
+                            users = {uid: fresh_user}
+                            inv = {uid: fresh_inv}
+                            await _settle_job_locked(BOT, users, inv, fresh_waifu, uid)
         except Exception:
             pass
 
@@ -833,14 +891,14 @@ async def work(ctx_or_interaction):
     async with lock:
         user_data = await _load_user(uid)
         inv_data = await _load_inventory(uid)
-        level_data = await _load_level(uid)
+        level_data = await _load_level_store()
         waifu_data = await _load_waifu_data()
 
         users = {uid: user_data}
         inv = {uid: inv_data}
-        levels = {uid: level_data}
+        levels = {uid: level_data if isinstance(level_data, dict) else {}}
 
-        if not all(isinstance(x, dict) for x in [user_data, inv_data, level_data, waifu_data]):
+        if not all(isinstance(x, dict) for x in [user_data, inv_data, waifu_data]):
             return await _reply(ctx_or_interaction, content="❌ Lỗi dữ liệu, vui lòng thử lại.", ephemeral=True)
 
         if isinstance(user_data.get("work_reward_pending"), dict):

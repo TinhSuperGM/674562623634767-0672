@@ -6,6 +6,7 @@ import copy
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Tuple, Optional
 
+from BotR import api_client
 from Data import data_user
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -436,7 +437,7 @@ class LeaderboardView(discord.ui.View):
         return build_embed_for_kind(self.kind, self.entries, self.page, inv, waifu_data)
 
     async def _persist_page(self, interaction: discord.Interaction) -> None:
-        channels = load_json(CHANNEL_FILE)
+        channels = await api_client.get_auction_channels()
         target_key = None
 
         for gid, data in channels.items():
@@ -452,7 +453,7 @@ class LeaderboardView(discord.ui.View):
         data = channels[target_key]
         data[f"leaderboard_page_{self.kind}"] = self.page
         channels[target_key] = data
-        await save_json(CHANNEL_FILE, channels)
+        await api_client.set_auction_channel(CHANNEL_FILE, channels)
 
     @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary, custom_id="leaderboard_prev")
     async def prev_page(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -557,8 +558,8 @@ async def update_top() -> None:
         top = load_top()
         state = load_state()
 
-        users = data_user.load_data()
-        inv = load_json(INV_FILE)
+        users = await api_client.get("/users")
+        inv = await api_client.get_inventory()
         couples = load_json(COUPLE_FILE)
 
         # GOLD
@@ -712,7 +713,7 @@ async def ranking_loop(bot):
 
     while True:
         try:
-            reward_state = load_reward()
+            reward_state = await api_client.get_reward_state()
 
             await update_top()
 
@@ -721,10 +722,10 @@ async def ranking_loop(bot):
             top_couple = get_top_couples()
             top_love = get_top_love()
 
-            inv = load_json(INV_FILE)
+            inv = await api_client.get_inventory()
             waifu_data = load_json(WAIFU_FILE)
 
-            channels = load_json(CHANNEL_FILE)
+            channels = await api_client.get_auction_channels()
 
             for gid, data in channels.items():
                 if not isinstance(data, dict):
@@ -808,7 +809,7 @@ async def ranking_loop(bot):
                 if guild_updated:
                     await asyncio.sleep(0.5)
 
-            await save_json(CHANNEL_FILE, channels)
+            await api_client.set_auction_channel(CHANNEL_FILE, channels)
 
             # ===== WEEKLY REWARD =====
             week_id = get_week_id()
@@ -824,7 +825,7 @@ async def ranking_loop(bot):
                 await reset_weekly_storage()
 
                 reward_state["last_week"] = week_id
-                await save_json(REWARD_FILE, reward_state)
+                await api_client.set_reward_state(REWARD_FILE, reward_state)
 
                 print(f"[RANKING] Reward distributed & reset for week {week_id}!")
 

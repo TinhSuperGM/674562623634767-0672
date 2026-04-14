@@ -1,93 +1,80 @@
 from __future__ import annotations
 
 import asyncio
-import discord
 import inspect
-import json
-import os
 import random
 import time
-from typing import Optional, Union
+from typing import Any, Dict, Optional, Union
 
+import discord
 from discord.ext import commands
 
 from Commands.prayer import get_luck
 from Data import data_user
-
-COOLDOWN = 64800  # 18 giờ
-
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATA_DIR = os.path.join(BASE_DIR, "Data")
-RECORD_FILE = os.path.join(DATA_DIR, "reaction_record.json")
-
-RECORD_LOCK = asyncio.Lock()
-_USER_LOCKS: dict[str, asyncio.Lock] = {}
-
-
-# ===== API WRAPPERS =====
-import inspect
 from BotR import api_client
 
+COOLDOWN = 64800  # 18 giờ
 RECORD_LOCK = asyncio.Lock()
 _USER_LOCKS: dict[str, asyncio.Lock] = {}
+
 
 async def _maybe_await(value):
     if inspect.isawaitable(value):
         return await value
     return value
 
+
 async def load_record():
     """
     Load reaction record from API.
+
     Accepts either:
     - {"records": [...]}
-    - [...]  (legacy)
+    - [...] (legacy)
     """
     data = await api_client.get_reaction_record()
-
     if isinstance(data, list):
         return data
-
     if isinstance(data, dict):
         records = data.get("records")
         if isinstance(records, list):
             return records
-
     return []
+
 
 async def save_record(records):
     if not isinstance(records, list):
         records = []
     await api_client.set_reaction_record({"records": records})
 
+
 async def _load_user(user_id: str) -> dict:
-    fn = getattr(data_user, "get_user_data", None) or getattr(data_user, "get_user", None)
+    fn = getattr(data_user, "get_user", None) or getattr(data_user, "get_user_data", None)
     if not callable(fn):
         return {}
-
     result = fn(user_id)
     data = await _maybe_await(result)
     return data if isinstance(data, dict) else {}
+
 
 async def _save_user(user_id: str, user: dict) -> None:
     fn = getattr(data_user, "save_user", None) or getattr(data_user, "update_user", None)
     if not callable(fn):
         return
-
     try:
         result = fn(user_id, user)
     except TypeError:
         result = fn(user_id, {"data": user})
-
     await _maybe_await(result)
+
 
 async def _add_gold(user_id: str, amount: int) -> None:
     fn = getattr(data_user, "add_gold", None)
     if not callable(fn):
         return
-
     result = fn(user_id, amount)
     await _maybe_await(result)
+
 
 def _get_user_lock(user_id: str) -> asyncio.Lock:
     user_id = str(user_id)
@@ -95,7 +82,7 @@ def _get_user_lock(user_id: str) -> asyncio.Lock:
         _USER_LOCKS[user_id] = asyncio.Lock()
     return _USER_LOCKS[user_id]
 
-# ===== FORMAT =====
+
 def format_time(seconds: int) -> str:
     seconds = max(0, int(seconds))
     h = seconds // 3600
@@ -115,37 +102,25 @@ def _safe_name(user_obj) -> str:
     return getattr(user_obj, "display_name", None) or getattr(user_obj, "name", None) or "Unknown"
 
 
-# ===== SEND (SAFE) =====
 async def send_message(
     ctx: Union[commands.Context, discord.Interaction],
     *,
     content=None,
     embed=None,
-    view=None
+    view=None,
 ):
     try:
         if isinstance(ctx, discord.Interaction):
             if not ctx.response.is_done():
-                await ctx.response.send_message(
-                    content=content,
-                    embed=embed,
-                    view=view
-                )
+                await ctx.response.send_message(content=content, embed=embed, view=view)
                 try:
                     return await ctx.original_response()
                 except Exception:
                     return None
-
-            return await ctx.followup.send(
-                content=content,
-                embed=embed,
-                view=view
-            )
-
+            return await ctx.followup.send(content=content, embed=embed, view=view)
         return await ctx.send(content=content, embed=embed, view=view)
-
     except Exception as e:
-        print("[SEND ERROR]", e)
+        print(f"[SEND ERROR] {e}")
         return None
 
 
@@ -153,7 +128,6 @@ def get_user(ctx):
     return ctx.user if isinstance(ctx, discord.Interaction) else ctx.author
 
 
-# ===== ROLL =====
 def roll_gold(luck: float) -> int:
     tiers = [
         (10, 100, 0.40),
@@ -163,7 +137,7 @@ def roll_gold(luck: float) -> int:
         (900, 1200, 0.02),
     ]
 
-    shift_percent = max(0, (luck - 1) / 25)
+    shift_percent = max(0.0, (float(luck) - 1.0) / 25.0)
     rates = [t[2] for t in tiers]
 
     for i in range(len(rates) - 1):
@@ -173,7 +147,6 @@ def roll_gold(luck: float) -> int:
 
     r = random.random()
     current = 0.0
-
     for (low, high, _), rate in zip(tiers, rates):
         current += rate
         if r <= current:
@@ -182,18 +155,26 @@ def roll_gold(luck: float) -> int:
     return random.randint(tiers[-1][0], tiers[-1][1])
 
 
-# ===== EMBEDS =====
-def build_daily_reward_embed(user_obj, total_reward: int, reward: int, streak_bonus: int, streak: int, luck: float, next_time: int) -> discord.Embed:
+def build_daily_reward_embed(
+    user_obj,
+    total_reward: int,
+    reward: int,
+    streak_bonus: int,
+    streak: int,
+    luck: float,
+    next_time: int,
+) -> discord.Embed:
     embed = discord.Embed(
-        title="💰 Điểm danh thành công",
+        title="Điểm danh thành công",
         description=(
             f"Chúc mừng **{_safe_name(user_obj)}** đã nhận thưởng hàng ngày.\n"
             f"Bạn vừa nhận được **{total_reward:,} <a:gold:1492792339436142703>**."
         ),
         color=discord.Color.gold(),
     )
+
     try:
-        embed.set_author(name=f"{_safe_name(user_obj)}", icon_url=_avatar_url(user_obj))
+        embed.set_author(name=_safe_name(user_obj), icon_url=_avatar_url(user_obj))
     except Exception:
         pass
 
@@ -204,24 +185,24 @@ def build_daily_reward_embed(user_obj, total_reward: int, reward: int, streak_bo
         pass
 
     embed.add_field(
-        name="🎁 Phần thưởng gốc",
+        name="Phần thưởng gốc",
         value=f"**{reward:,} <a:gold:1492792339436142703>**",
-        inline=True
+        inline=True,
     )
     embed.add_field(
-        name="🔥 Streak bonus",
+        name="Streak bonus",
         value=f"**+{streak_bonus:,} <a:gold:1492792339436142703>**\nChuỗi: **{streak} ngày**",
-        inline=True
+        inline=True,
     )
     embed.add_field(
-        name="🍀 Luck",
+        name="Luck",
         value=f"**{luck:.2f}**",
-        inline=True
+        inline=True,
     )
     embed.add_field(
         name="⏳ Điểm danh tiếp",
         value=f"<t:{next_time}:R>\n<t:{next_time}:F>",
-        inline=False
+        inline=False,
     )
     embed.set_footer(text="Quay lại mỗi ngày để giữ streak và tăng thưởng.")
     return embed
@@ -229,19 +210,18 @@ def build_daily_reward_embed(user_obj, total_reward: int, reward: int, streak_bo
 
 def build_event_prepare_embed(user_obj, preview_reward: int) -> discord.Embed:
     embed = discord.Embed(
-        title="🎯 EVENT ĐẶC BIỆT!",
+        title="EVENT ĐẶC BIỆT!",
         description=(
             f"**{_safe_name(user_obj)}** vừa kích hoạt event phản xạ.\n"
             f"Phần thưởng nền: **{preview_reward:,} <a:gold:1492792339436142703>**\n\n"
-            f"⚡ Hãy chờ tín hiệu và click càng chuẩn càng tốt."
+            "⚡ Hãy chờ tín hiệu và click càng chuẩn càng tốt."
         ),
         color=discord.Color.blurple(),
     )
     try:
-        embed.set_author(name=f"{_safe_name(user_obj)}", icon_url=_avatar_url(user_obj))
+        embed.set_author(name=_safe_name(user_obj), icon_url=_avatar_url(user_obj))
     except Exception:
         pass
-
     try:
         if _avatar_url(user_obj):
             embed.set_thumbnail(url=_avatar_url(user_obj))
@@ -249,13 +229,13 @@ def build_event_prepare_embed(user_obj, preview_reward: int) -> discord.Embed:
         pass
 
     embed.add_field(
-        name="📌 Luật event",
+        name="Luật event",
         value=(
             "• Click càng nhanh càng có thưởng cao\n"
             "• Quá nhanh có thể bị xem là macro\n"
             "• Có combo và jackpot"
         ),
-        inline=False
+        inline=False,
     )
     embed.set_footer(text="Bạn chỉ có một cơ hội. Chuẩn bị thật nhanh.")
     return embed
@@ -266,15 +246,14 @@ def build_event_clicking_embed(user_obj) -> discord.Embed:
         title="⚡ CLICK NGAY!",
         description=(
             f"**{_safe_name(user_obj)}** hãy click vào nút bên dưới ngay bây giờ.\n"
-            f"Phần thưởng sẽ thay đổi theo tốc độ phản xạ."
+            "Phần thưởng sẽ thay đổi theo tốc độ phản xạ."
         ),
         color=discord.Color.orange(),
     )
     try:
-        embed.set_author(name=f"{_safe_name(user_obj)}", icon_url=_avatar_url(user_obj))
+        embed.set_author(name=_safe_name(user_obj), icon_url=_avatar_url(user_obj))
     except Exception:
         pass
-
     try:
         if _avatar_url(user_obj):
             embed.set_thumbnail(url=_avatar_url(user_obj))
@@ -282,38 +261,45 @@ def build_event_clicking_embed(user_obj) -> discord.Embed:
         pass
 
     embed.add_field(
-        name="🏁 Mục tiêu",
+        name="Mục tiêu",
         value="Phản xạ chuẩn, không quá sớm, không quá chậm.",
-        inline=False
+        inline=False,
     )
     embed.set_footer(text="Bấm ngay khi nhìn thấy nút để tối ưu phần thưởng.")
     return embed
 
 
-def build_event_result_embed(user_obj, reaction_time: float, multiplier: float, note: str, reward: int, combo: int, combo_bonus: int, is_new: bool, is_cheat: bool) -> discord.Embed:
+def build_event_result_embed(
+    user_obj,
+    reaction_time: float,
+    multiplier: float,
+    note: str,
+    reward: int,
+    combo: int,
+    combo_bonus: int,
+    is_new: bool,
+    is_cheat: bool,
+) -> discord.Embed:
     if is_cheat:
         color = discord.Color.red()
-        title = "🚫 Macro detected"
+        title = "Macro detected"
     elif reaction_time <= 0.7:
         color = discord.Color.gold()
         title = "⚡ GODLIKE!"
     elif reaction_time <= 1:
         color = discord.Color.green()
-        title = "💎 PERFECT!"
+        title = "PERFECT!"
     elif reaction_time <= 1.7:
         color = discord.Color.blurple()
-        title = "🔥 Nhanh!"
+        title = "Nhanh!"
     else:
         color = discord.Color.dark_teal()
-        title = "🐢 Chậm"
+        title = "Chậm"
 
-    embed = discord.Embed(
-        title=title,
-        description=note,
-        color=color
-    )
+    embed = discord.Embed(title=title, description=note, color=color)
+
     try:
-        embed.set_author(name=f"{_safe_name(user_obj)}", icon_url=_avatar_url(user_obj))
+        embed.set_author(name=_safe_name(user_obj), icon_url=_avatar_url(user_obj))
     except Exception:
         pass
 
@@ -323,45 +309,24 @@ def build_event_result_embed(user_obj, reaction_time: float, multiplier: float, 
     except Exception:
         pass
 
+    embed.add_field(name="⏱️ Thời gian phản xạ", value=f"**{reaction_time:.3f}s**", inline=True)
+    embed.add_field(name="Hệ số", value=f"**x{multiplier}**", inline=True)
+    embed.add_field(name="Phần thưởng", value=f"**+{reward:,} <a:gold:1492792339436142703>**", inline=True)
     embed.add_field(
-        name="⏱️ Thời gian phản xạ",
-        value=f"**{reaction_time:.3f}s**",
-        inline=True
-    )
-    embed.add_field(
-        name="🔥 Hệ số",
-        value=f"**x{multiplier}**",
-        inline=True
-    )
-    embed.add_field(
-        name="💰 Phần thưởng",
-        value=f"**+{reward:,} <a:gold:1492792339436142703>**",
-        inline=True
-    )
-    embed.add_field(
-        name="📈 Combo",
+        name="Combo",
         value=f"**{combo}**\nBonus: **+{combo_bonus:,} <a:gold:1492792339436142703>**",
-        inline=True
+        inline=True,
     )
-    embed.add_field(
-        name="🏅 Kỷ lục",
-        value="Có" if is_new else "Không",
-        inline=True
-    )
-    embed.add_field(
-        name="🧠 Đánh giá",
-        value=note,
-        inline=False
-    )
+    embed.add_field(name="Kỷ lục", value="Có" if is_new else "Không", inline=True)
+    embed.add_field(name="Đánh giá", value=note, inline=False)
     embed.set_footer(text="Event phản xạ kết thúc.")
     return embed
 
 
-# ===== VIEW =====
 class ClickEventView(discord.ui.View):
     def __init__(self, user_id: str, base_reward: int):
         super().__init__(timeout=5)
-        self.user_id = user_id
+        self.user_id = str(user_id)
         self.base_reward = base_reward
         self.start_time: Optional[float] = None
         self.clicked = False
@@ -383,12 +348,11 @@ class ClickEventView(discord.ui.View):
 
         if reaction_time < 0.5:
             multiplier = 0
-            note = "🚫 Macro detected"
+            note = "Macro detected"
             reward = 0
             is_cheat = True
         else:
             is_cheat = False
-
             if reaction_time < 0.7:
                 multiplier = 1
                 note = "⚠️ Suspicious"
@@ -397,16 +361,16 @@ class ClickEventView(discord.ui.View):
                 note = "⚡ GODLIKE!"
             elif reaction_time <= 1.3:
                 multiplier = 4
-                note = "💎 PERFECT!"
+                note = "PERFECT!"
             elif reaction_time <= 1.7:
                 multiplier = 2.5
-                note = "🔥 Nhanh!"
+                note = "Nhanh!"
             elif reaction_time <= 2.3:
                 multiplier = 1.5
-                note = "👍 Ổn"
+                note = "Ổn"
             else:
                 multiplier = 1
-                note = "🐢 Chậm"
+                note = "Chậm"
 
             reward = int(self.base_reward * multiplier + 0.5)
 
@@ -417,7 +381,6 @@ class ClickEventView(discord.ui.View):
         user_lock = _get_user_lock(self.user_id)
         async with user_lock:
             user = await _load_user(self.user_id)
-
             combo = int(user.get("reaction_combo", 0))
 
             if not is_cheat:
@@ -435,30 +398,34 @@ class ClickEventView(discord.ui.View):
 
             if not is_cheat and reaction_time <= 0.35 and combo >= 3:
                 reward += 200
-                note += "\n🔥 PERFECT CHAIN!"
+                note += "\nPERFECT CHAIN!"
 
             if not is_cheat and reaction_time <= 0.25 and random.random() < 0.1:
                 reward *= 3
-                note += "\n💥 ULTRA JACKPOT x3"
+                note += "\nULTRA JACKPOT x3"
 
             if not is_cheat:
                 best = user.get("best_reaction")
-                if not best or reaction_time < best:
+                if not best or reaction_time < float(best):
                     user["best_reaction"] = reaction_time
 
             if not is_cheat:
                 async with RECORD_LOCK:
-                    records = load_record()
-
+                    records = await load_record()
                     existing = next((r for r in records if r.get("user_id") == self.user_id), None)
+
                     if not existing or reaction_time < float(existing.get("time", 999999)):
                         records = [r for r in records if r.get("user_id") != self.user_id]
                         records.append({"user_id": self.user_id, "time": reaction_time})
+                        records = sorted(records, key=lambda x: float(x.get("time", 999999)))[:5]
 
-                    records = sorted(records, key=lambda x: float(x.get("time", 999999)))[:5]
-                    save_record(records)
+                    await save_record(records)
 
-                    is_new = bool(records) and records[0].get("user_id") == self.user_id and float(records[0].get("time", 0)) == reaction_time
+                    is_new = (
+                        bool(records)
+                        and records[0].get("user_id") == self.user_id
+                        and float(records[0].get("time", 0)) == reaction_time
+                    )
 
                 if is_new:
                     reward += 500
@@ -480,7 +447,7 @@ class ClickEventView(discord.ui.View):
             combo,
             combo_bonus,
             is_new,
-            is_cheat
+            is_cheat,
         )
 
         try:
@@ -496,8 +463,8 @@ class ClickEventView(discord.ui.View):
             try:
                 embed = discord.Embed(
                     title="⌛ EVENT KẾT THÚC",
-                    description="Bạn đã bỏ lỡ event đặc biệt này (1% xuất hiện) 😢",
-                    color=discord.Color.red()
+                    description="Bạn đã bỏ lỡ event đặc biệt này (1% xuất hiện).",
+                    color=discord.Color.red(),
                 )
                 embed.set_footer(text="Hẹn bạn ở lần sau.")
                 await self.message.edit(embed=embed, view=None)
@@ -505,7 +472,6 @@ class ClickEventView(discord.ui.View):
                 pass
 
 
-# ===== MAIN =====
 async def daily_logic(ctx):
     if isinstance(ctx, discord.Interaction) and not ctx.response.is_done():
         try:
@@ -516,11 +482,10 @@ async def daily_logic(ctx):
     user_obj = get_user(ctx)
     user_id = str(user_obj.id)
     now = int(time.time())
-
     user_lock = _get_user_lock(user_id)
+
     async with user_lock:
         user = await _load_user(user_id)
-
         last = int(user.get("last_daily", 0))
         remaining = COOLDOWN - (now - last)
 
@@ -529,18 +494,19 @@ async def daily_logic(ctx):
             embed = discord.Embed(
                 title="⏱️ Điểm danh chưa sẵn sàng",
                 description=(
-                    f"Ô **{_safe_name(user_obj)}** à, bạn cần chờ thêm **{format_time(remaining)}** nữa trước khi điểm danh lại."
+                    f"Ô **{_safe_name(user_obj)}** à, bạn cần chờ thêm **{format_time(remaining)}** nữa "
+                    f"trước khi điểm danh lại."
                 ),
-                color=discord.Color.orange()
+                color=discord.Color.orange(),
             )
             try:
-                embed.set_author(name=f"{_safe_name(user_obj)}", icon_url=_avatar_url(user_obj))
+                embed.set_author(name=_safe_name(user_obj), icon_url=_avatar_url(user_obj))
             except Exception:
                 pass
             embed.add_field(
                 name="⏳ Có thể nhận lại vào",
                 value=f"<t:{next_time}:R>\n<t:{next_time}:F>",
-                inline=False
+                inline=False,
             )
             embed.set_footer(text="Quay lại sau khi cooldown kết thúc.")
             return await send_message(ctx, embed=embed)
@@ -551,7 +517,6 @@ async def daily_logic(ctx):
 
         streak += 1
         streak_bonus = min(streak * 20, 500)
-
         luck = float(await _get_luck(user_obj.id))
         reward = roll_gold(luck)
         total_reward = reward + streak_bonus
@@ -560,20 +525,20 @@ async def daily_logic(ctx):
         user["daily_streak"] = streak
         await _save_user(user_id, user)
 
-    try:
-        await _add_gold(user_id, total_reward)
-    except Exception as e:
-        print(f"[daily_logic] add_gold error: {e}")
+        try:
+            await _add_gold(user_id, total_reward)
+        except Exception as e:
+            print(f"[daily_logic] add_gold error: {e}")
 
     if random.random() < 0.1:
         preview_reward = max(200, total_reward // 2)
         preparing_embed = build_event_prepare_embed(user_obj, preview_reward)
         msg = await send_message(ctx, embed=preparing_embed)
-
         await asyncio.sleep(random.uniform(0.8, 2.5))
 
         view = ClickEventView(user_id, preview_reward)
         click_embed = build_event_clicking_embed(user_obj)
+
         try:
             msg = await msg.edit(embed=click_embed, view=view)
         except Exception:
@@ -591,9 +556,11 @@ async def daily_logic(ctx):
         streak_bonus=streak_bonus,
         streak=streak,
         luck=luck,
-        next_time=now + COOLDOWN
+        next_time=now + COOLDOWN,
     )
     await send_message(ctx, embed=success_embed)
 
+
+daily = daily_logic
 
 print("Loaded daily has successs")

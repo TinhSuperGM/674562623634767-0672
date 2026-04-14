@@ -5,7 +5,7 @@ from typing import Any, Dict, Optional
 
 import aiohttp
 
-# ==================([github.com](https://github.com/TinhSuperGM/674562623634767-0672/tree/main/BotR))===========
+# =========================================================
 # BotR API Client
 # - Use this file from Commands/ and main.py
 # - It talks to BotR/backend/app.py
@@ -211,7 +211,7 @@ async def set_reaction_record(data: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # =========================================================
-# Convenience wrappers for generic data files
+# Generic access for any JSON bucket
 # =========================================================
 async def get_data(name: str) -> Dict[str, Any]:
     return await get(f"/data/{name}")
@@ -222,7 +222,6 @@ async def set_data(name: str, data: Any) -> Dict[str, Any]:
 
 
 if __name__ == "__main__":
-    # Simple smoke test when run directly
     import asyncio
 
     async def _main() -> None:

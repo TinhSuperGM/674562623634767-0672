@@ -140,7 +140,7 @@ async def prayer_logic(ctx):
             return await _send(
                 ctx,
                 "Thần linh đã hiển linh và hoàn thành tâm nguyện của bạn!\n"
-                f"✨ Luck của bạn đã tăng lên **{current_luck}**.",
+                f"✨ Bạn đang rất may mắn đấy.",
             )
 
         return await _send(

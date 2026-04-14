@@ -1,157 +1,126 @@
-import json
-import os
+from __future__ import annotations
+
 import asyncio
+from typing import Any, Dict, Optional
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-FILE_PATH = os.path.join(BASE_DIR, "Data", "user.json")
+from BotR import api_client
 
-# ===== CACHE =====
-DATA_CACHE = None
-DIRTY = False
+# =========================================================
+# data_user.py
+# - Compatibility wrapper for old code
+# - Keeps old function names so Commands/ and main.py
+#   do not need to be rewritten all at once
+# - All data is now stored through the API
+# =========================================================
 
-USER_LOCKS = {}
+USER_LOCKS: Dict[str, asyncio.Lock] = {}
 
-def get_lock(user_id: str):
+
+def get_lock(user_id: str) -> asyncio.Lock:
     user_id = str(user_id)
     if user_id not in USER_LOCKS:
         USER_LOCKS[user_id] = asyncio.Lock()
     return USER_LOCKS[user_id]
 
 
-# ===== LOAD =====
-def load_data():
-    global DATA_CACHE
-
-    if DATA_CACHE is not None:
-        return DATA_CACHE
-
-    if not os.path.exists(FILE_PATH):
-        with open(FILE_PATH, "w", encoding="utf-8") as f:
-            json.dump({}, f)
-
-    try:
-        with open(FILE_PATH, "r", encoding="utf-8") as f:
-            DATA_CACHE = json.load(f)
-    except:
-        DATA_CACHE = {}
-
-    return DATA_CACHE
+# ===== LOAD / SAVE =====
+async def load_data() -> Dict[str, Any]:
+    data = await api_client.get("/users")
+    return data if isinstance(data, dict) else {}
 
 
-# ===== SAVE =====
-def save_data(data=None):
-    global DATA_CACHE
-
-    if data is not None:
-        DATA_CACHE = data
-
-    tmp = FILE_PATH + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(DATA_CACHE, f, indent=4, ensure_ascii=False)
-    os.replace(tmp, FILE_PATH)
+async def save_data(data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    if data is None:
+        data = await load_data()
+    if not isinstance(data, dict):
+        data = {}
+    return await api_client.set_data("users", data)
 
 
-# ===== AUTO SAVE =====
+# ===== AUTO SAVE (kept for compatibility, no-op if unused) =====
 async def auto_save_loop():
-    global DIRTY
     while True:
         await asyncio.sleep(5)
-        if DIRTY:
-            save_data()
-            DIRTY = False
+        await api_client.post("/save-json", {})
 
 
 # ===== GET USER =====
-def get_user(user_id):
-    data = load_data()
+async def get_user(user_id: str) -> Dict[str, Any]:
+    data = await load_data()
     user_id = str(user_id)
 
-    if user_id not in data:
-        data[user_id] = {
-            "gold": 0,
-            "last_free": 0
-        }
+    if user_id not in data or not isinstance(data[user_id], dict):
+        await api_client.create_user(user_id, {"gold": 0, "last_free": 0})
+        data = await load_data()
 
-    return data[user_id]
+    return data.get(user_id, {"gold": 0, "last_free": 0})
 
 
-# ===== GET GOLD =====
-def get_gold(user_id):
-    user = get_user(user_id)
+async def get_gold(user_id: str) -> int:
+    user = await get_user(user_id)
     return int(user.get("gold", 0))
 
 
 # ===== ADD GOLD (LOCKED) =====
-async def add_gold(user_id, amount):
-    global DIRTY
-
+async def add_gold(user_id: str, amount: int) -> bool:
     lock = get_lock(user_id)
     async with lock:
-        user = get_user(user_id)
-
-        user["gold"] = int(user.get("gold", 0)) + int(amount)
-
-        if user["gold"] < 0:
-            user["gold"] = 0
-
-        DIRTY = True
+        return await api_client.add_gold(str(user_id), int(amount))
 
 
 # ===== REMOVE GOLD (LOCKED) =====
-async def remove_gold(user_id, amount):
-    global DIRTY
-
+async def remove_gold(user_id: str, amount: int) -> bool:
     lock = get_lock(user_id)
     async with lock:
-        user = get_user(user_id)
-
-        if user["gold"] < amount:
-            return False
-
-        user["gold"] -= int(amount)
-        DIRTY = True
-        return True
+        return await api_client.remove_gold(str(user_id), int(amount))
 
 
-# ===== TRANSFER GOLD (ANTI-MINT CORE) =====
-async def transfer_gold(from_user, to_user, amount):
-    global DIRTY
+# ===== TRANSFER GOLD =====
+async def transfer_gold(from_user: str, to_user: str, amount: int) -> bool:
+    from_user = str(from_user)
+    to_user = str(to_user)
+    amount = int(amount)
 
-    u1 = str(from_user)
-    u2 = str(to_user)
-
-    # lock theo thứ tự để tránh deadlock
-    first, second = sorted([u1, u2])
+    first, second = sorted([from_user, to_user])
 
     async with get_lock(first):
         async with get_lock(second):
-
-            data = load_data()
-
-            if u1 not in data:
-                data[u1] = {"gold": 0}
-
-            if u2 not in data:
-                data[u2] = {"gold": 0}
-
-            if data[u1]["gold"] < amount:
+            from_gold = await get_gold(from_user)
+            if from_gold < amount:
                 return False
 
-            data[u1]["gold"] -= amount
-            data[u2]["gold"] += amount
+            ok1 = await api_client.remove_gold(from_user, amount)
+            if not ok1:
+                return False
 
-            DIRTY = True
+            ok2 = await api_client.add_gold(to_user, amount)
+            if not ok2:
+                await api_client.add_gold(from_user, amount)
+                return False
+
             return True
 
 
 # ===== SAVE USER =====
-def save_user(user_id, user_data):
-    global DIRTY
-    data = load_data()
+async def save_user(user_id: str, user_data: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(user_data, dict):
+        user_data = {"gold": 0, "last_free": 0}
+
     user_id = str(user_id)
-
+    data = await load_data()
     data[user_id] = user_data
-    DIRTY = True
+    await api_client.set_data("users", data)
+    print("Loaded data user has success")
+    return user_data
 
 
-print("Loaded data user has success")
+# ===== SYNC HELPERS FOR OLD CODE =====
+def load_data_sync() -> Dict[str, Any]:
+    raise RuntimeError("load_data_sync() is not supported in API mode. Use 'await load_data()'.")
+
+
+def get_user_sync(user_id: str) -> Dict[str, Any]:
+    raise RuntimeError("get_user_sync() is not supported in API mode. Use 'await get_user()'.")
+
+
+print("Loaded data_user (API mode)")

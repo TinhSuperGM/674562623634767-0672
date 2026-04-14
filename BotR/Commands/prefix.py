@@ -26,8 +26,8 @@ from Commands.huy_dau_gia import huy_dau_gia_logic
 from Commands.setup import send_roll_embed_logic
 from Commands.select_waifu import select_waifu_logic
 from Commands.sell import sell_logic
-from Commands.setup import setup_channel_logic
 from Commands.setup import send_shop_embed_logic
+from Commands.setup import setup_channel_logic
 from Commands.use import use_logic
 from Commands.view_waifu import view_waifu_logic
 from Commands.waifu_list import waifu_list_run
@@ -46,13 +46,17 @@ def _normalize_name(name: str) -> str:
 def _parse_mention_id(token: str) -> Optional[int]:
     if not token:
         return None
+
     token = token.strip()
+
     if token.startswith("<@") and token.endswith(">"):
         token = token[2:-1]
         if token.startswith("!"):
             token = token[1:]
+
     if token.startswith("<#") and token.endswith(">"):
         token = token[2:-1]
+
     try:
         return int(token)
     except Exception:
@@ -131,9 +135,11 @@ async def _smart_target(
 def _resolve_channel(message: discord.Message, token: Optional[str]) -> Optional[discord.abc.GuildChannel]:
     if not token or not message.guild:
         return None
+
     cid = _parse_mention_id(token)
     if cid is None:
         return None
+
     return message.guild.get_channel(cid)
 
 
@@ -157,8 +163,10 @@ class _PrefixResponse:
 
     async def send_modal(self, modal):
         raise RuntimeError("Modal không hỗ trợ trong prefix command")
-    def is_done(self):  # 🔥 thêm dòng này
+
+    def is_done(self):
         return self.last_message is not None
+
 
 class _PrefixFollowup:
     def __init__(self, ctx: "PrefixContext"):
@@ -194,12 +202,15 @@ async def _send_embed_like(ctx: PrefixContext, embed_data: dict):
         description=embed_data.get("description", ""),
         color=discord.Color.pink(),
     )
+
     image = embed_data.get("image")
     footer = embed_data.get("footer")
+
     if image:
         embed.set_image(url=image)
     if footer:
         embed.set_footer(text=footer)
+
     return await ctx.channel.send(embed=embed)
 
 
@@ -209,11 +220,13 @@ async def setup(bot):
     """
     if getattr(bot, "_prefix_listener_ready", False):
         return
+
     bot._prefix_listener_ready = True
 
     async def on_message(message: discord.Message):
         if message.author.bot:
             return
+
         if not message.content.startswith("."):
             return
 
@@ -225,8 +238,6 @@ async def setup(bot):
         if not parts:
             return
 
-        raw_name = _normalize_name(parts[0])
-        args = parts[1:]
         ctx = PrefixContext(bot, message)
 
         async def reply(msg, ephemeral=False):
@@ -261,7 +272,10 @@ async def setup(bot):
             "gift-waifu-ad": "gift-waifu-ad",
             "help": "help",
             "profile": "profile",
-            # 🔥 short alias
+            "prayer": "prayer",
+            "team": "team",
+            "fight": "fight",
+            # short alias
             "bc": "baucua",
             "bau": "baucua",
             "cf": "coinflip",
@@ -282,13 +296,12 @@ async def setup(bot):
             "ws": "select-waifu",
             "me": "profile",
             "pf": "profile",
-            "prayer": "prayer",
             "pray": "prayer",
-            "team": "team",
-            "fight": "fight",
         }
 
         # ===== SMART PARSER =====
+        raw_name = _normalize_name(parts[0])
+        args = parts[1:]
         cmd = None
         used_len = 1
 
@@ -302,6 +315,9 @@ async def setup(bot):
                     break
 
         if cmd is None:
+            cmd = aliases.get(raw_name)
+
+        if cmd is None:
             return
 
         args = parts[used_len:]
@@ -310,22 +326,18 @@ async def setup(bot):
         try:
             if cmd == "setup":
                 if len(args) < 2:
-                    return await reply("❌ Cú pháp: .setup <auction|ranking|shop|roll> <channel>")
-
+                    return await reply("❌ Cú pháp: .setup <shop|roll> <channel>")
                 ch = _parse_mention_id(args[1])
                 channel_id = str(ch) if ch is not None else args[1]
-
                 type_ = args[0].lower()
 
                 await setup_channel_logic(ctx, type_, channel_id)
 
-                # 🔥 AUTO SEND PANEL
+                # AUTO SEND PANEL
                 if type_ == "shop":
                     return await send_shop_embed_logic(ctx, channel_id)
-
                 if type_ in ["roll", "roll-waifu"]:
                     return await send_roll_embed_logic(ctx, channel_id)
-
                 return
 
             if cmd == "gold":
@@ -354,7 +366,6 @@ async def setup(bot):
                     return await reply("❌ Cú pháp: .view-waifu <waifu_id>")
 
                 # Hỗ trợ thêm: .view-waifu @user <waifu_id>
-                # Không phá cú pháp cũ .view-waifu <waifu_id>
                 if message.mentions and len(args) >= 2:
                     return await view_waifu_logic(message.mentions[0], reply, reply_embed, args[1])
 
@@ -362,7 +373,6 @@ async def setup(bot):
 
             if cmd == "bag":
                 target = None
-
                 if message.mentions:
                     target = message.mentions[0]
                 elif args:
@@ -371,7 +381,6 @@ async def setup(bot):
                     ref = message.reference.resolved
                     if ref:
                         target = ref.author
-
                 return await bag_logic(ctx, target or message.author)
 
             if cmd == "use":
@@ -380,17 +389,17 @@ async def setup(bot):
                 qty = 1
 
                 if not args:
-                    return await reply("❌ Cú pháp: .use <waifu_id>|item <item_id> [qty]")
+                    return await reply("❌ Cú pháp: .use <waifu|item> <id> [qty]")
 
                 if args[0].lower() in {"waifu", "item"}:
                     mode = args[0].lower()
                     if mode == "waifu":
                         if len(args) < 2:
-                            return await reply("❌ Cú pháp: .use waifu <waifu_id>")
+                            return await reply("❌ Cú pháp: .use waifu <id>")
                         waifu_id = args[1]
                     else:
                         if len(args) < 2:
-                            return await reply("❌ Cú pháp: .use item <item_id> [qty]")
+                            return await reply("❌ Cú pháp: .use item <id> [qty]")
                         item_id = args[1]
                         if len(args) >= 3:
                             qty = int(args[2])
@@ -401,14 +410,17 @@ async def setup(bot):
                         qty = int(args[1])
                     else:
                         waifu_id = candidate
+
                 return await use_logic(message.author, reply, waifu_id, item_id, qty)
 
             if cmd == "sell":
                 if not args:
                     return await reply("❌ Cú pháp: .sell <waifu_id> [bag|collection] [amount]")
+
                 waifu_id = args[0]
                 source = None
                 amount = 1
+
                 if len(args) >= 2:
                     if args[1].lower() in {"bag", "collection"}:
                         source = args[1].lower()
@@ -416,17 +428,21 @@ async def setup(bot):
                             amount = int(args[2])
                     elif args[1].isdigit():
                         amount = int(args[1])
+
                 return await sell_logic(ctx, waifu_id, source, amount)
 
             if cmd == "give":
                 if len(args) < 2:
-                    return await reply("❌ Cú pháp: .give <gold|waifu> <user> <amount>")
+                    return await reply("❌ Cú pháp: .give <gold|waifu> <user> ...")
+
                 type_ = args[0]
                 target = await _smart_target(bot, message, args[1:], fallback_author=False)
                 if target is None:
                     return await reply("❌ Không tìm thấy người nhận.")
+
                 amount = None
                 waifu_id = None
+
                 if type_ == "gold":
                     if len(args) < 3:
                         return await reply("❌ Cú pháp: .give gold <user> <amount>")
@@ -437,11 +453,15 @@ async def setup(bot):
                     waifu_id = args[2]
                 else:
                     return await reply("❌ Type phải là gold hoặc waifu.")
+
                 return await gift_logic(ctx, type_, target, amount, waifu_id)
 
             if cmd == "couple":
                 if not args:
-                    return await reply("❌ Cú pháp: .couple <user> | .couple release | .couple cancel | .couple info | .couple gift <rose|cake>")
+                    return await reply(
+                        "❌ Cú pháp: .couple | .couple release | .couple cancel | .couple info | .couple gift"
+                    )
+
                 sub = _normalize_name(args[0])
 
                 if sub == "release":
@@ -476,22 +496,22 @@ async def setup(bot):
 
             if cmd == "coinflip":
                 if len(args) < 2:
-                    return await reply("❌ Cú pháp: .coinflip <ngua|sap> <amount>")
+                    return await reply("❌ Cú pháp: .coinflip <side> <bet>")
                 return await coinflip_logic(ctx, args[0], int(args[1]))
 
             if cmd == "baucua":
                 if len(args) < 2:
-                    return await reply("❌ Cú pháp: .baucua <nai|bau|ga|ca|cua|tom> <amount>")
+                    return await reply("❌ Cú pháp: .baucua <choice> <bet>")
                 return await baucua_logic(ctx, args[0], int(args[1]))
 
             if cmd == "code":
                 if not args:
-                    return await reply("❌ Cú pháp: .code <mã>")
+                    return await reply("❌ Cú pháp: .code <code>")
                 return await code_logic(ctx, args[0])
 
             if cmd == "dau-gia":
                 if len(args) < 3:
-                    return await reply("❌ Cú pháp: .dau-gia <waifu_id> <min_price> <step>")
+                    return await reply("❌ Cú pháp: .dau-gia <waifu_id> <price> <time>")
                 return await dau_gia_logic(ctx, args[0], int(args[1]), int(args[2]))
 
             if cmd == "huy-dau-gia":
@@ -511,26 +531,25 @@ async def setup(bot):
                 target = await _smart_target(bot, message, args, fallback_author=True)
                 embed = get_profile_embed(bot, target)
                 return await ctx.send(embed=embed)
+
             if cmd == "prayer":
                 return await prayer_logic(ctx)
 
             if cmd == "help":
                 await help_prefix(message)
                 return
+
             if cmd == "fight":
                 target = await _smart_target(bot, message, args, fallback_author=False)
-
                 if not target:
                     return await reply("❌ Cú pháp: .fight @user")
-
                 return await fight_logic(ctx, target)
+
             if cmd == "team":
                 if not args:
-                    return await reply("❌ Cú pháp: .team <set/add/remove/show> [waifu_id]")
-
+                    return await reply("❌ Cú pháp: .team <action> [waifu_id]")
                 action = args[0].lower()
                 waifu_id = args[1] if len(args) >= 2 else None
-
                 return await team_logic(ctx, action, waifu_id)
 
         except ValueError:
@@ -540,4 +559,4 @@ async def setup(bot):
             return await reply("❌ Có lỗi khi xử lý lệnh.")
 
     bot.add_listener(on_message, "on_message")
-print("Loaded prefix has successs")
+    print("Loaded prefix has successs")

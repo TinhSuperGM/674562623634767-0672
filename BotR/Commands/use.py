@@ -1,18 +1,14 @@
-import json
-import os
 import random
 import asyncio
-import tempfile
 
 from Commands.prayer import get_luck
 from Data.level import sync_all
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-INV_FILE = os.path.join(BASE_DIR, "Data", "inventory.json")
+from api_client import get, post  # 🔥 dùng API
 
 # ===== LOCKS =====
 _user_locks = {}
-_inventory_lock = asyncio.Lock()  # 🔥 GLOBAL LOCK
+_inventory_lock = asyncio.Lock()  # 🔥 giữ nguyên logic lock
 
 
 def get_lock(uid: str):
@@ -21,79 +17,46 @@ def get_lock(uid: str):
     return _user_locks[uid]
 
 
-# ===== FILE =====
-def ensure_file():
-    os.makedirs(os.path.dirname(INV_FILE), exist_ok=True)
-    if not os.path.exists(INV_FILE):
-        with open(INV_FILE, "w", encoding="utf-8") as f:
-            json.dump({}, f)
-
-
-def _load():
-    try:
-        with open(INV_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            return data if isinstance(data, dict) else {}
-    except:
-        return {}
-
-
-def _save(inv):
-    tmp_fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(INV_FILE))
-    try:
-        with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
-            json.dump(inv, f, indent=4, ensure_ascii=False)
-        os.replace(tmp_path, INV_FILE)
-    finally:
-        if os.path.exists(tmp_path):
-            try:
-                os.remove(tmp_path)
-            except:
-                pass
-
-
 # ===== MAIN =====
 async def use_logic(user, send, waifu_id=None, item_id=None, qty=1):
-    ensure_file()
     uid = str(user.id)
 
     if qty <= 0:
         return await send("❌ Số lượng phải lớn hơn 0.")
 
-    async with get_lock(uid):           # lock user
-        async with _inventory_lock:     # 🔥 lock toàn inventory
+    async with get_lock(uid):
+        async with _inventory_lock:
 
-            inv = await asyncio.to_thread(_load)
+            # ===== LOAD INVENTORY TỪ API =====
+            inv = await get(f"/inventory/{uid}") or {}
 
-            user_data = inv.setdefault(uid, {
-                "waifus": {},
-                "bag": {},
-                "bag_item": {},
-                "default_waifu": None
-            })
-
-            user_data.setdefault("waifus", {})
-            user_data.setdefault("bag", {})
-            user_data.setdefault("bag_item", {})
+            # đảm bảo structure giống JSON (KHÔNG phá schema)
+            inv.setdefault("waifus", {})
+            inv.setdefault("bag", {})
+            inv.setdefault("bag_item", {})
+            inv.setdefault("default_waifu", None)
 
             # ===== USE WAIFU =====
             if waifu_id:
-                if waifu_id not in user_data["bag"]:
+                if waifu_id not in inv["bag"]:
                     return await send(f"❌ Bạn không có waifu `{waifu_id}`.")
 
-                if waifu_id in user_data["waifus"]:
+                if waifu_id in inv["waifus"]:
                     return await send(f"❌ Waifu `{waifu_id}` đã có.")
 
-                user_data["waifus"][waifu_id] = 0
-                user_data["bag"][waifu_id] -= 1
+                inv["waifus"][waifu_id] = 0
+                inv["bag"][waifu_id] -= 1
 
-                if user_data["bag"][waifu_id] <= 0:
-                    del user_data["bag"][waifu_id]
+                if inv["bag"][waifu_id] <= 0:
+                    del inv["bag"][waifu_id]
 
-                if not user_data["default_waifu"]:
-                    user_data["default_waifu"] = waifu_id
+                if not inv["default_waifu"]:
+                    inv["default_waifu"] = waifu_id
 
-                await asyncio.to_thread(_save, inv)
+                # ===== SAVE API =====
+                await post(f"/inventory/{uid}/update", {
+                    "data": inv
+                })
 
                 return await send(f"✨ Đã mở khóa waifu **{waifu_id}**!")
 
@@ -101,15 +64,15 @@ async def use_logic(user, send, waifu_id=None, item_id=None, qty=1):
             if item_id:
                 item_id = item_id.lower()
 
-                if item_id not in user_data["bag_item"]:
+                if item_id not in inv["bag_item"]:
                     return await send(f"❌ Bạn không có `{item_id}`.")
 
-                if user_data["bag_item"][item_id] < qty:
+                if inv["bag_item"][item_id] < qty:
                     return await send(f"❌ Không đủ `{item_id}`.")
 
-                default_w = user_data.get("default_waifu")
+                default_w = inv.get("default_waifu")
 
-                if not default_w or default_w not in user_data["waifus"]:
+                if not default_w or default_w not in inv["waifus"]:
                     return await send("❌ Default waifu lỗi.")
 
                 luck = get_luck(user.id)
@@ -132,21 +95,23 @@ async def use_logic(user, send, waifu_id=None, item_id=None, qty=1):
                     return await send("❌ Item không hợp lệ.")
 
                 # APPLY
-                user_data["waifus"][default_w] += total_point
-                user_data["bag_item"][item_id] -= qty
+                inv["waifus"][default_w] += total_point
+                inv["bag_item"][item_id] -= qty
 
-                if user_data["bag_item"][item_id] <= 0:
-                    del user_data["bag_item"][item_id]
+                if inv["bag_item"][item_id] <= 0:
+                    del inv["bag_item"][item_id]
 
-                # SAVE TRƯỚC
-                await asyncio.to_thread(_save, inv)
+                # ===== SAVE API =====
+                await post(f"/inventory/{uid}/update", {
+                    "data": inv
+                })
 
-                # SYNC SAU (không block transaction)
+                # SYNC SAU
                 try:
-                    if asyncio.iscoroutinefunction(sync_one):
-                        asyncio.create_task(sync_one(uid, default_w))
+                    if asyncio.iscoroutinefunction(sync_all):
+                        asyncio.create_task(sync_all())
                     else:
-                        sync_one(uid, default_w)
+                        sync_all()
                 except:
                     pass
 
@@ -155,4 +120,6 @@ async def use_logic(user, send, waifu_id=None, item_id=None, qty=1):
                 )
 
             return await send("❌ Bạn phải nhập waifu_id hoặc item_id.")
-print("Loaded use has success")
+
+
+print("Loaded use has success (API)")

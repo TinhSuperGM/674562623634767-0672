@@ -1,50 +1,10 @@
 import discord
-import json
-import os
-import tempfile
 import asyncio
 from typing import Any, Dict
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATA_DIR = os.path.join(BASE_DIR, "Data")
-INV_FILE = os.path.join(DATA_DIR, "inventory.json")
+from api_client import get, post  # dùng API thay JSON
 
 _inv_lock = asyncio.Lock()
-
-
-def ensure_storage() -> None:
-    os.makedirs(DATA_DIR, exist_ok=True)
-    if not os.path.exists(INV_FILE):
-        with open(INV_FILE, "w", encoding="utf-8") as f:
-            json.dump({}, f, indent=4, ensure_ascii=False)
-
-
-def _load_no_lock() -> Dict[str, Any]:
-    try:
-        with open(INV_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            return data if isinstance(data, dict) else {}
-    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
-        return {}
-
-
-def _save_no_lock(inv: Dict[str, Any]) -> None:
-    tmp_fd, tmp_path = tempfile.mkstemp(
-        prefix="inventory_",
-        suffix=".json",
-        dir=DATA_DIR
-    )
-    try:
-        with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
-            json.dump(inv, f, indent=4, ensure_ascii=False)
-        os.replace(tmp_path, INV_FILE)
-    except Exception:
-        try:
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
-        except Exception:
-            pass
-        raise
 
 
 async def _send_response(interaction: discord.Interaction, content: str, ephemeral: bool = False):
@@ -63,9 +23,6 @@ async def _send_response(interaction: discord.Interaction, content: str, ephemer
 
 # ===== HELPER FIX DEFAULT =====
 def _fix_default_waifu(user_data: Dict[str, Any]) -> None:
-    """
-    Nếu default_waifu không còn trong waifus hoặc count <= 0 → reset về None
-    """
     default = user_data.get("default_waifu")
     waifus = user_data.get("waifus", {})
 
@@ -85,8 +42,6 @@ def _fix_default_waifu(user_data: Dict[str, Any]) -> None:
 
 # ===== LOGIC =====
 async def select_waifu_logic(interaction, waifu_id: str):
-    ensure_storage()
-
     if not interaction or not interaction.user:
         return
 
@@ -100,24 +55,29 @@ async def select_waifu_logic(interaction, waifu_id: str):
         )
 
     waifu_id = waifu_id.lower().strip()
-
     error_msg = None
 
     async with _inv_lock:
-        inv = await asyncio.to_thread(_load_no_lock)
+        try:
+            inv = await get(f"/inventory/{uid}")
+        except Exception:
+            inv = {}
 
-        user_data = inv.get(uid)
+        if not isinstance(inv, dict):
+            inv = {}
+
+        user_data = inv
+
         if not isinstance(user_data, dict):
             error_msg = f"❌ Bạn không sở hữu waifu `{waifu_id}`!"
         else:
-            # đảm bảo structure
+            # đảm bảo structure (GIỮ NGUYÊN logic cũ)
             if "waifus" not in user_data or not isinstance(user_data["waifus"], dict):
                 user_data["waifus"] = {}
 
             if "default_waifu" not in user_data:
                 user_data["default_waifu"] = None
 
-            # 🔥 FIX: đảm bảo default không bị "treo"
             _fix_default_waifu(user_data)
 
             waifus = user_data["waifus"]
@@ -126,10 +86,11 @@ async def select_waifu_logic(interaction, waifu_id: str):
                 error_msg = f"❌ Bạn không sở hữu waifu `{waifu_id}`!"
             else:
                 user_data["default_waifu"] = waifu_id
-                inv[uid] = user_data
 
                 try:
-                    await asyncio.to_thread(_save_no_lock, inv)
+                    await post(f"/inventory/{uid}/update", {
+                        "data": user_data
+                    })
                 except Exception:
                     error_msg = "❌ Có lỗi khi lưu dữ liệu!"
 
@@ -142,24 +103,23 @@ async def select_waifu_logic(interaction, waifu_id: str):
     )
 
 
-# ===== OPTIONAL: AUTO CLEAN (GỌI Ở COMMAND KHÁC) =====
+# ===== AUTO CLEAN =====
 async def cleanup_default_waifu(uid: str):
-    """
-    Gọi hàm này sau khi SELL / REMOVE để auto clear default nếu cần
-    """
     async with _inv_lock:
-        inv = await asyncio.to_thread(_load_no_lock)
+        try:
+            user_data = await get(f"/inventory/{uid}")
+        except Exception:
+            return
 
-        user_data = inv.get(uid)
         if not isinstance(user_data, dict):
             return
 
         _fix_default_waifu(user_data)
 
-        inv[uid] = user_data
-
         try:
-            await asyncio.to_thread(_save_no_lock, inv)
+            await post(f"/inventory/{uid}/update", {
+                "data": user_data
+            })
         except Exception:
             pass
 
@@ -169,4 +129,4 @@ async def setup(bot):
     pass
 
 
-print("Loaded select waifu has success")
+print("Loaded select waifu has success (API mode)")

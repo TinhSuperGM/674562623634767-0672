@@ -1,50 +1,8 @@
 import discord
-import json
-import os
 import re
 import copy
+
 from Data import data_user
-
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-INV_FILE = os.path.join(BASE_DIR, "Data", "inventory.json")
-WAIFU_FILE = os.path.join(BASE_DIR, "Data", "waifu_data.json")
-
-
-# =========================
-# LOAD / SAVE (ATOMIC)
-# =========================
-def ensure_file(path: str, default_obj):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    if not os.path.exists(path):
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(default_obj, f, indent=4, ensure_ascii=False)
-
-
-def load():
-    ensure_file(INV_FILE, {})
-    ensure_file(WAIFU_FILE, {})
-
-    with open(INV_FILE, encoding="utf-8") as f:
-        inv = json.load(f)
-
-    with open(WAIFU_FILE, encoding="utf-8") as f:
-        w = json.load(f)
-
-    return inv, w
-
-
-def save(inv, w):
-    tmp1 = INV_FILE + ".tmp"
-    tmp2 = WAIFU_FILE + ".tmp"
-
-    with open(tmp1, "w", encoding="utf-8") as f:
-        json.dump(inv, f, indent=4, ensure_ascii=False)
-
-    with open(tmp2, "w", encoding="utf-8") as f:
-        json.dump(w, f, indent=4, ensure_ascii=False)
-
-    os.replace(tmp1, INV_FILE)
-    os.replace(tmp2, WAIFU_FILE)
 
 
 # =========================
@@ -72,20 +30,17 @@ def normalize(text: str) -> str:
     return text
 
 
-def ensure_user_struct(inv: dict, uid: str):
-    if uid not in inv or not isinstance(inv.get(uid), dict):
-        inv[uid] = {}
+def ensure_user_struct(inv: dict):
+    if not isinstance(inv.get("waifus"), dict):
+        inv["waifus"] = {}
 
-    if not isinstance(inv[uid].get("waifus"), dict):
-        inv[uid]["waifus"] = {}
+    if not isinstance(inv.get("bag"), dict):
+        inv["bag"] = {}
 
-    if not isinstance(inv[uid].get("bag"), dict):
-        inv[uid]["bag"] = {}
+    if "bag_item" not in inv or not isinstance(inv.get("bag_item"), dict):
+        inv["bag_item"] = {}
 
-    if "bag_item" not in inv[uid] or not isinstance(inv[uid].get("bag_item"), dict):
-        inv[uid]["bag_item"] = {}
-
-    inv[uid].setdefault("default_waifu", None)
+    inv.setdefault("default_waifu", None)
 
 
 def find_waifu_id(query: str, inv_waifus: dict, wdata: dict):
@@ -120,7 +75,7 @@ async def _respond(interaction: discord.Interaction, content=None, **kwargs):
 
 
 # =========================
-# CONFIRM VIEW
+# CONFIRM VIEW (GIỮ NGUYÊN)
 # =========================
 class ConfirmView(discord.ui.View):
     def __init__(self, owner_id, waifu_id, gold, callback):
@@ -146,10 +101,7 @@ class ConfirmView(discord.ui.View):
             sold, total = await self.callback()
         except Exception as e:
             self.done = False
-            return await interaction.followup.send(
-                f"❌ Giao dịch thất bại: {e}",
-                ephemeral=True
-            )
+            return await interaction.followup.send(f"❌ Giao dịch thất bại: {e}", ephemeral=True)
 
         for item in self.children:
             item.disabled = True
@@ -160,13 +112,10 @@ class ConfirmView(discord.ui.View):
                 view=self
             )
         except Exception:
-            try:
-                await interaction.followup.send(
-                    f"💰 Đã bán **{self.waifu_id}**! +{total} gold",
-                    ephemeral=True
-                )
-            except Exception:
-                pass
+            await interaction.followup.send(
+                f"💰 Đã bán **{self.waifu_id}**! +{total} gold",
+                ephemeral=True
+            )
 
     @discord.ui.button(label="Hủy", style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -176,26 +125,25 @@ class ConfirmView(discord.ui.View):
         for item in self.children:
             item.disabled = True
 
-        await interaction.response.edit_message(
-            content="❌ Đã hủy.",
-            view=self
-        )
+        await interaction.response.edit_message(content="❌ Đã hủy.", view=self)
 
 
 # =========================
-# LOGIC (FIXED)
+# LOGIC (API VERSION)
 # =========================
 async def sell_logic(interaction, waifu_id: str, source: str = None, amount: int = 1):
+    from Data.api_client import get_inventory, add_item, remove_item
     uid = str(interaction.user.id)
 
-    inv, w = load()
+    inv = await get_inventory(uid)
+    w = await load_waifu_data()
 
-    if uid not in inv:
+    if not inv:
         return await _respond(interaction, "❌ Không có dữ liệu!", ephemeral=True)
 
-    ensure_user_struct(inv, uid)
+    ensure_user_struct(inv)
 
-    waifu_id = find_waifu_id(waifu_id, inv[uid]["waifus"], w)
+    waifu_id = find_waifu_id(waifu_id, inv["waifus"], w)
     if not waifu_id:
         return await _respond(interaction, "❌ Waifu không tồn tại!", ephemeral=True)
 
@@ -207,8 +155,8 @@ async def sell_logic(interaction, waifu_id: str, source: str = None, amount: int
     if price <= 0:
         return await _respond(interaction, "❌ Không có giá!", ephemeral=True)
 
-    bag_count = inv[uid]["bag"].get(waifu_id, 0)
-    has_collection = waifu_id in inv[uid]["waifus"]
+    bag_count = inv["bag"].get(waifu_id, 0)
+    has_collection = waifu_id in inv["waifus"]
 
     if bag_count <= 0 and not has_collection:
         return await _respond(interaction, "❌ Không có waifu!", ephemeral=True)
@@ -217,19 +165,18 @@ async def sell_logic(interaction, waifu_id: str, source: str = None, amount: int
         lock = data_user.get_lock(uid)
 
         async with lock:
-            inv2, w2 = load()
-            ensure_user_struct(inv2, uid)
+            inv2 = await get_inventory(uid)
+            ensure_user_struct(inv2)
 
-            user_data = data_user.get_user(uid)
+            user_data = await data_user.get_user_data(uid)
             if not isinstance(user_data, dict):
                 user_data = {}
 
-            user_before = copy.deepcopy(user_data)
             inv_before = copy.deepcopy(inv2)
-            w_before = copy.deepcopy(w2)
+            user_before = copy.deepcopy(user_data)
 
-            bag_count2 = inv2[uid]["bag"].get(waifu_id, 0)
-            has_collection2 = waifu_id in inv2[uid]["waifus"]
+            bag_count2 = inv2["bag"].get(waifu_id, 0)
+            has_collection2 = waifu_id in inv2["waifus"]
 
             sold = 0
 
@@ -238,9 +185,9 @@ async def sell_logic(interaction, waifu_id: str, source: str = None, amount: int
                 if take <= 0:
                     raise Exception("Hết waifu trong bag")
 
-                inv2[uid]["bag"][waifu_id] -= take
-                if inv2[uid]["bag"][waifu_id] <= 0:
-                    del inv2[uid]["bag"][waifu_id]
+                inv2["bag"][waifu_id] -= take
+                if inv2["bag"][waifu_id] <= 0:
+                    del inv2["bag"][waifu_id]
 
                 sold = take
 
@@ -248,19 +195,19 @@ async def sell_logic(interaction, waifu_id: str, source: str = None, amount: int
                 if not has_collection2:
                     raise Exception("Không còn trong collection")
 
-                del inv2[uid]["waifus"][waifu_id]
+                del inv2["waifus"][waifu_id]
                 sold = 1
 
             else:
                 if bag_count2 > 0:
                     take = min(amount, bag_count2)
-                    inv2[uid]["bag"][waifu_id] -= take
-                    if inv2[uid]["bag"][waifu_id] <= 0:
-                        del inv2[uid]["bag"][waifu_id]
+                    inv2["bag"][waifu_id] -= take
+                    if inv2["bag"][waifu_id] <= 0:
+                        del inv2["bag"][waifu_id]
                     sold += take
 
                 if sold == 0 and has_collection2:
-                    del inv2[uid]["waifus"][waifu_id]
+                    del inv2["waifus"][waifu_id]
                     sold = 1
 
             if sold <= 0:
@@ -268,23 +215,16 @@ async def sell_logic(interaction, waifu_id: str, source: str = None, amount: int
 
             total = sold * price
 
+            # update gold
             current_gold = int(user_data.get("gold", 0) or 0)
             user_data["gold"] = current_gold + total
 
             try:
-                save(inv2, w2)
-                data_user.save_user(uid, user_data)
-                data_user.save_data()
+                await update_inventory(uid, inv2)
+                await data_user.update_user(uid, user_data)
             except Exception:
-                try:
-                    save(inv_before, w_before)
-                except Exception:
-                    pass
-                try:
-                    data_user.save_user(uid, user_before)
-                    data_user.save_data()
-                except Exception:
-                    pass
+                await update_inventory(uid, inv_before)
+                await data_user.update_user(uid, user_before)
                 raise
 
             return sold, total
@@ -302,13 +242,9 @@ async def sell_logic(interaction, waifu_id: str, source: str = None, amount: int
     sold, total = await do_sell()
 
     if interaction.response.is_done():
-        await interaction.followup.send(
-            f"💰 Đã bán {waifu_id}, nhận {total} gold!"
-        )
+        await interaction.followup.send(f"💰 Đã bán {waifu_id}, nhận {total} gold!")
     else:
-        await interaction.response.send_message(
-            f"💰 Đã bán {waifu_id}, nhận {total} gold!"
-        )
+        await interaction.response.send_message(f"💰 Đã bán {waifu_id}, nhận {total} gold!")
 
 
 # =========================
@@ -318,4 +254,4 @@ async def setup(bot):
     pass
 
 
-print("Loaded sell has success")
+print("Loaded sell (API) success")

@@ -1,5 +1,5 @@
 import discord
-from Data import data_user
+from Data.api_client import get, post
 
 
 # ===== LOGIC =====
@@ -7,13 +7,19 @@ async def gold_logic(interaction, user: discord.User = None):
     target = user if user else interaction.user
     user_id = str(target.id)
 
-    data = data_user.load_data()
+    # ===== GET USER FROM API =====
+    user_data = await get(f"/users/{user_id}")
 
     # ===== USER CHƯA CÓ DATA =====
-    if user_id not in data:
+    if not user_data or "gold" not in user_data:
         if target.id == interaction.user.id:
-            data[user_id] = {"gold": 100, "last_free": 0}
-            data_user.save_data(data)
+            # tạo user mới
+            await post(f"/users/{user_id}/update", {
+                "data": {
+                    "gold": 100,
+                    "last_free": 0
+                }
+            })
 
             return await interaction.response.send_message(
                 "🎉 Chào người mới! Bạn nhận 100 🪙 để bắt đầu!"
@@ -23,7 +29,7 @@ async def gold_logic(interaction, user: discord.User = None):
                 "❌ Người này chưa đăng ký tài khoản!"
             )
 
-    gold_amount = data[user_id].get("gold", 0)
+    gold_amount = int(user_data.get("gold", 0))
 
     # ===== HIỂN THỊ =====
     if target.id != interaction.user.id:

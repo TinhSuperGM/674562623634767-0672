@@ -78,7 +78,7 @@ async def _defer_if_needed(ctx):
             pass
 
 
-# ===== SEND HELPER (FIX CHÍNH) =====
+# ===== SEND HELPER =====
 async def send_message(
     ctx: Union[commands.Context, discord.Interaction],
     *,
@@ -110,18 +110,13 @@ def build_wait_embed(user):
         description="<a:gacha:1490382513388912740> <a:gacha:1490382513388912740> <a:gacha:1490382513388912740>",
         color=0xf1c40f
     )
-
     embed.set_author(name="Bầu Cua", icon_url=None)
-    embed.set_image(url="")
-    embed.set_footer(text="")
-
     return embed
 
 
 # ===== EMBED KẾT QUẢ =====
 def build_result_embed(user, result, choice, count, amount, reward, win, gold, spam, scale):
     embed = discord.Embed()
-
     embed.set_author(name="Bầu Cua", icon_url=None)
 
     result_line = f"Kết quả: {format_result(result)}"
@@ -145,7 +140,6 @@ def build_result_embed(user, result, choice, count, amount, reward, win, gold, s
         )
 
     embed.set_footer(text=f"Số dư hiện tại: {gold} <a:gold:1492792339436142703>")
-
     return embed
 
 
@@ -154,7 +148,7 @@ async def baucua_logic(ctx, choice: str, amount: Any):
     await _defer_if_needed(ctx)
 
     user = _get_user(ctx)
-    uid = user.id
+    uid = str(user.id)  # ✅ FIX: API dùng string key
 
     choice = str(choice).strip().lower()
     amount = _safe_int(amount)
@@ -165,17 +159,18 @@ async def baucua_logic(ctx, choice: str, amount: Any):
     if amount <= 0:
         return await send_message(ctx, content="❌ Gold phải > 0")
 
+    # ✅ API version (await)
     if not await data_user.remove_gold(uid, amount):
         return await send_message(ctx, content="❌ Không đủ gold!")
 
-    delay, scale, spam = spam_control(uid)
+    delay, scale, spam = spam_control(user.id)
 
     msg = await send_message(ctx, embed=build_wait_embed(user))
 
     wait_time = random.uniform(1.5, 3) + delay
     await asyncio.sleep(wait_time)
 
-    luck = _safe_int(get_luck(uid))
+    luck = _safe_int(await get_luck(uid))  # ✅ FIX: await
 
     weights = {a: 1.0 for a in animals}
     weights[choice] *= (1 + max(0, (luck - 1) / 100) * 5)
@@ -186,13 +181,15 @@ async def baucua_logic(ctx, choice: str, amount: Any):
     if count > 0:
         base = int(amount * (count + 0.9))
         reward = int(base * scale)
-        await data_user.add_gold(uid, reward)
+        await data_user.add_gold(uid, reward)  # ✅ API
         win = True
     else:
         reward = 0
         win = False
 
-    gold = data_user.get_user(uid).get("gold", 0)
+    # ✅ FIX: get_user phải await
+    user_data = await data_user.get_user(uid)
+    gold = user_data.get("gold", 0)
 
     embed = build_result_embed(
         user, result, choice, count, amount, reward, win, gold, spam, scale
@@ -205,4 +202,4 @@ async def baucua_logic(ctx, choice: str, amount: Any):
         pass
 
 
-print("Loaded bầu cua has successs")
+print("Loaded bầu cua (API) has success")

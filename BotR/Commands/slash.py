@@ -20,10 +20,8 @@ from Commands.couple import (
 )
 from Commands.daily import daily_logic
 from Commands.dau_gia import (
-    AUCTION_FILE,
     BidView,
     dau_gia_logic,
-    load_json as load_auction_json,
 )
 from Commands.gift_waifu_ad import gift_waifu_ad_logic
 from Commands.give import gift_logic

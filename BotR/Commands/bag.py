@@ -1,17 +1,13 @@
 import asyncio
-import json
-import os
 import time
 from typing import Any, Dict, Optional, Union
 
 import discord
 from discord.ext import commands
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATA_DIR = os.path.join(BASE_DIR, "Data")
-INV_FILE = os.path.join(DATA_DIR, "inventory.json")
-WAIFU_FILE = os.path.join(DATA_DIR, "waifu_data.json")
+from api_client import get  # 👈 dùng API
 
+# ===== CACHE =====
 _INV_CACHE: Dict[str, Any] = {}
 _WAIFU_CACHE: Dict[str, Any] = {}
 _INV_TS = 0.0
@@ -22,10 +18,10 @@ _WAIFU_TTL = 30.0
 _LOCKS: Dict[str, asyncio.Lock] = {}
 
 
-def get_lock(path: str) -> asyncio.Lock:
-    if path not in _LOCKS:
-        _LOCKS[path] = asyncio.Lock()
-    return _LOCKS[path]
+def get_lock(key: str) -> asyncio.Lock:
+    if key not in _LOCKS:
+        _LOCKS[key] = asyncio.Lock()
+    return _LOCKS[key]
 
 
 def safe_int(value: Any) -> int:
@@ -35,56 +31,38 @@ def safe_int(value: Any) -> int:
         return 0
 
 
-def safe_load_json(path: str) -> Dict[str, Any]:
-    if not os.path.exists(path):
-        try:
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump({}, f, ensure_ascii=False, indent=4)
-        except Exception:
-            pass
-        return {}
+# ===== LOAD FROM API =====
 
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
-
-
-def load_inventory(force: bool = False) -> Dict[str, Any]:
+async def load_inventory(force: bool = False) -> Dict[str, Any]:
     global _INV_CACHE, _INV_TS
     now = time.time()
+
     if force or not _INV_CACHE or (now - _INV_TS) > _INV_TTL:
-        _INV_CACHE = safe_load_json(INV_FILE)
+        data = await get("/inventory")
+        _INV_CACHE = data if isinstance(data, dict) else {}
         _INV_TS = now
+
     return _INV_CACHE
 
 
-def load_waifu_data(force: bool = False) -> Dict[str, Any]:
+async def load_waifu_data(force: bool = False) -> Dict[str, Any]:
     global _WAIFU_CACHE, _WAIFU_TS
     now = time.time()
+
     if force or not _WAIFU_CACHE or (now - _WAIFU_TS) > _WAIFU_TTL:
-        _WAIFU_CACHE = safe_load_json(WAIFU_FILE)
+        data = await get("/waifu")
+        _WAIFU_CACHE = data if isinstance(data, dict) else {}
         _WAIFU_TS = now
+
     return _WAIFU_CACHE
 
 
+# ❌ KHÔNG CẦN SAVE FILE NỮA
 async def save_inventory(data: Dict[str, Any]) -> None:
-    global _INV_CACHE, _INV_TS
-    lock = get_lock(INV_FILE)
+    pass
 
-    async with lock:
-        tmp = INV_FILE + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=4)
-        os.replace(tmp, INV_FILE)
 
-        # sync cache ngay sau khi save
-        _INV_CACHE = data
-        _INV_TS = time.time()
-
+# ===== LOGIC GIỮ NGUYÊN =====
 
 def get_waifu_name(waifu_id: str, waifu_data: Dict[str, Any]) -> str:
     meta = waifu_data.get(waifu_id, {})
@@ -212,9 +190,9 @@ async def bag_logic(
     requester = get_user(ctx)
     target_user = await resolve_target_user(ctx, target_user)
 
-    # 🔥 FIX QUAN TRỌNG: luôn load mới để tránh stale data
-    inv = load_inventory(force=True)
-    waifu_data = load_waifu_data(force=True)
+    # 🔥 API load
+    inv = await load_inventory(force=True)
+    waifu_data = await load_waifu_data(force=True)
 
     user_data = inv.get(str(target_user.id), {})
     if not isinstance(user_data, dict):
@@ -230,4 +208,4 @@ async def bag_logic(
     await send_message(ctx, content=content, embed=embed)
 
 
-print("Loaded bag has successs")
+print("Loaded bag (API mode) has success")

@@ -1,30 +1,7 @@
 import discord
 from discord.ui import View, Button
+
 from Data import data_user
-import json
-import os
-
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-WAIFU_FILE = os.path.join(BASE_DIR, "Data", "waifu_data.json")
-INV_FILE = os.path.join(BASE_DIR, "Data", "inventory.json")
-
-
-# ===== LOAD / SAVE INVENTORY =====
-def load_inv():
-    if not os.path.exists(INV_FILE):
-        with open(INV_FILE, "w", encoding="utf-8") as f:
-            json.dump({}, f, ensure_ascii=False, indent=4)
-    with open(INV_FILE, encoding="utf-8") as f:
-        return json.load(f)
-
-
-def save_inv(data):
-    tmp = INV_FILE + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=4, ensure_ascii=False)
-    os.replace(tmp, INV_FILE)
-
-
 # ===== RESPOND HELPERS =====
 async def _defer_if_needed(interaction: discord.Interaction, *, ephemeral: bool = True):
     try:
@@ -45,19 +22,25 @@ async def _send(interaction: discord.Interaction, content=None, **kwargs):
 
 # ===== LOGIC =====
 async def gift_logic(interaction, type: str, user: discord.User, amount: int = None, waifu_id: str = None):
+    from Data.api_client import get_inventory, add_item, remove_item
     sender = interaction.user
 
-    # Chỉ defer sớm cho flow dài; prompt confirm waifu vẫn dùng followup bình thường
     if type == "gold":
         await _defer_if_needed(interaction, ephemeral=True)
 
-    # ===== LOAD DATA =====
-    inv = load_inv()
+    # ===== LOAD DATA (API) =====
+    sender_inv = await get_inventory(str(sender.id))
+    recipient_inv = await get_inventory(str(user.id))
+    waifu_data = await load_waifu_data()
 
-    waifu_data = {}
-    if os.path.exists(WAIFU_FILE):
-        with open(WAIFU_FILE, encoding="utf-8") as f:
-            waifu_data = json.load(f)
+    # đảm bảo key tồn tại (KHÔNG phá schema)
+    sender_inv.setdefault("waifus", {})
+    sender_inv.setdefault("bag", {})
+    sender_inv.setdefault("bag_item", {})
+
+    recipient_inv.setdefault("waifus", {})
+    recipient_inv.setdefault("bag", {})
+    recipient_inv.setdefault("bag_item", {})
 
     # =========================================================
     # ===================== GIFT GOLD ==========================
@@ -72,7 +55,6 @@ async def gift_logic(interaction, type: str, user: discord.User, amount: int = N
         fee = int(amount * 0.05)
         received = amount - fee
 
-        # data_user.remove_gold / add_gold là coroutine -> phải await
         success = await data_user.remove_gold(sender.id, amount)
         if not success:
             return await _send(interaction, "❌ Không đủ gold!", ephemeral=True)
@@ -80,7 +62,6 @@ async def gift_logic(interaction, type: str, user: discord.User, amount: int = N
         try:
             await data_user.add_gold(user.id, received)
         except Exception as e:
-            # rollback an toàn nếu bước cộng gold thất bại
             print("[GIFT GOLD ERROR]", e)
             try:
                 await data_user.add_gold(sender.id, amount)
@@ -102,19 +83,11 @@ async def gift_logic(interaction, type: str, user: discord.User, amount: int = N
         if waifu_id is None:
             return await _send(interaction, "❌ Chưa chọn waifu!", ephemeral=True)
 
-        uid = str(sender.id)
-        recipient_id = str(user.id)
+        if sender.id == user.id:
+            return await _send(interaction, "❌ Không thể tự tặng!", ephemeral=True)
 
-        sender_data = inv.setdefault(uid, {"waifus": {}, "bag": {}})
-        sender_data.setdefault("waifus", {})
-        sender_data.setdefault("bag", {})
-
-        recipient_data = inv.setdefault(recipient_id, {"waifus": {}, "bag": {}})
-        recipient_data.setdefault("waifus", {})
-        recipient_data.setdefault("bag", {})
-
-        bag = sender_data["bag"]
-        owned = sender_data["waifus"]
+        bag = sender_inv["bag"]
+        owned = sender_inv["waifus"]
 
         # ===== CHECK OWN =====
         if waifu_id in bag and bag[waifu_id] > 0:
@@ -122,21 +95,12 @@ async def gift_logic(interaction, type: str, user: discord.User, amount: int = N
         elif waifu_id in owned:
             source = "waifus"
         else:
-            return await _send(
-                interaction,
-                "❌ Bạn không có waifu này!",
-                ephemeral=True
-            )
-
-        if uid == recipient_id:
-            return await _send(interaction, "❌ Không thể tự tặng!", ephemeral=True)
+            return await _send(interaction, "❌ Bạn không có waifu này!", ephemeral=True)
 
         rank = waifu_data.get(waifu_id, {}).get("rank", "thường")
         name = waifu_data.get(waifu_id, {}).get("name", waifu_id)
 
-        # =====================================================
-        # ================= CONFIRM FIX ========================
-        # =====================================================
+        # ===== CONFIRM =====
         if rank in ["truyen_thuyet", "toi_thuong", "limited"]:
             class ConfirmView(View):
                 def __init__(self):
@@ -171,9 +135,7 @@ async def gift_logic(interaction, type: str, user: discord.User, amount: int = N
             if not view.result:
                 return await interaction.followup.send("❌ Đã hủy!", ephemeral=True)
 
-        # =====================================================
-        # ================= TRANSACTION ========================
-        # =====================================================
+        # ===== TRANSACTION =====
         try:
             # REMOVE
             if source == "bag":
@@ -184,10 +146,11 @@ async def gift_logic(interaction, type: str, user: discord.User, amount: int = N
                 owned.pop(waifu_id, None)
 
             # ADD
-            recipient_data["bag"][waifu_id] = recipient_data["bag"].get(waifu_id, 0) + 1
+            recipient_inv["bag"][waifu_id] = recipient_inv["bag"].get(waifu_id, 0) + 1
 
-            # SAVE (atomic)
-            save_inv(inv)
+            # ===== SAVE API =====
+            await update_inventory(str(sender.id), sender_inv)
+            await update_inventory(str(user.id), recipient_inv)
 
         except Exception as e:
             print("[GIFT ERROR]", e)

@@ -1,5 +1,3 @@
-import json
-import os
 import time
 import asyncio
 import datetime
@@ -8,39 +6,14 @@ from typing import Union
 import discord
 from discord.ext import commands
 
+from api_client import get, post  # 👈 dùng API
 from Data import data_user
-
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATA_DIR = os.path.join(BASE_DIR, "Data")
-
-CODE_FILE = os.path.join(DATA_DIR, "code.json")
-USED_FILE = os.path.join(DATA_DIR, "used_code.json")
 
 _CODE_LOCK = asyncio.Lock()
 _COOLDOWN = {}
 
 
-# ===== SAFE JSON =====
-def load_json(path):
-    if not os.path.exists(path):
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump({}, f, ensure_ascii=False, indent=4)
-
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
-
-
-def save_json(path, data):
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=4)
-    os.replace(tmp, path)
-
-
-# ===== UNIVERSAL SEND (FIX CHUẨN) =====
+# ===== UNIVERSAL SEND =====
 async def send(
     ctx: Union[commands.Context, discord.Interaction],
     msg: str
@@ -101,8 +74,8 @@ async def code_logic(ctx, code: str):
     _COOLDOWN[user_id] = now
 
     async with _CODE_LOCK:
-        raw_codes = load_json(CODE_FILE)
-        used = load_json(USED_FILE)
+        raw_codes = await get("/code") or {}
+        used = await get("/used_code") or {}
 
         code_map = {str(k).lower(): k for k in raw_codes.keys()}
 
@@ -121,7 +94,7 @@ async def code_logic(ctx, code: str):
                 "expires": None
             }
             raw_codes[real_code] = code_data
-            save_json(CODE_FILE, raw_codes)
+            await post("/code/bulk_replace", {"data": raw_codes})
 
         if not isinstance(code_data, dict):
             return await send(ctx, "❌ Code lỗi dữ liệu!")
@@ -159,8 +132,8 @@ async def code_logic(ctx, code: str):
         code_data["used"] = used_count + 1
         raw_codes[real_code] = code_data
 
-        save_json(USED_FILE, used)
-        save_json(CODE_FILE, raw_codes)
+        await post("/used_code/bulk_replace", {"data": used})
+        await post("/code/bulk_replace", {"data": raw_codes})
 
     # ===== RESULT =====
     max_use_text = code_data.get("max_use") or "∞"
@@ -176,4 +149,4 @@ async def code_logic(ctx, code: str):
     )
 
 
-print("Loaded code has success")
+print("Loaded code (API mode) has success")

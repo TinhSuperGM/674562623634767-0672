@@ -1,80 +1,8 @@
-import json
-import os
-import tempfile
-import threading
+from __future__ import annotations
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+from typing import Any
 
-WAIFU_FILE = os.path.join(BASE_DIR, "Data", "waifu_data.json")
-INV_FILE = os.path.join(BASE_DIR, "Data", "inventory.json")
-LEVEL_FILE = os.path.join(BASE_DIR, "Data", "level.json")
-
-_FILE_LOCK = threading.RLock()
-
-
-# ===== SAFE FILE HELPERS =====
-def ensure_files():
-    os.makedirs(os.path.join(BASE_DIR, "Data"), exist_ok=True)
-
-    for path in (WAIFU_FILE, INV_FILE, LEVEL_FILE):
-        if not os.path.exists(path):
-            save_json_atomic(path, {})
-
-
-def safe_load(path):
-    try:
-        with _FILE_LOCK:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-
-        return data if isinstance(data, dict) else {}
-
-    except (FileNotFoundError, json.JSONDecodeError, OSError, ValueError):
-        return {}
-    except Exception:
-        return {}
-
-
-def save_json_atomic(path, data):
-    folder = os.path.dirname(path)
-    os.makedirs(folder, exist_ok=True)
-
-    tmp_path = None
-
-    try:
-        with _FILE_LOCK:
-            fd, tmp_path = tempfile.mkstemp(dir=folder, prefix=".tmp_", suffix=".json")
-
-            try:
-                with os.fdopen(fd, "w", encoding="utf-8") as f:
-                    json.dump(data, f, indent=4, ensure_ascii=False)
-                    f.flush()
-                    os.fsync(f.fileno())
-
-                os.replace(tmp_path, path)
-
-            finally:
-                if tmp_path and os.path.exists(tmp_path):
-                    try:
-                        os.remove(tmp_path)
-                    except OSError:
-                        pass
-
-        return True
-
-    except Exception:
-        if tmp_path and os.path.exists(tmp_path):
-            try:
-                os.remove(tmp_path)
-            except OSError:
-                pass
-
-        return False
-
-
-def load_data():
-    ensure_files()
-    return safe_load(WAIFU_FILE), safe_load(INV_FILE), safe_load(LEVEL_FILE)
+from api_client import get, post
 
 
 # ===== SAFE CONVERTERS =====
@@ -192,8 +120,12 @@ async def view_waifu_logic(user, send, send_embed, waifu_id: str):
     waifu_id = str(waifu_id)
 
     try:
-        waifu_data, inventory, level_data = load_data()
         user_id = str(user.id)
+
+        # ===== LOAD FROM API =====
+        waifu_data = await get("/waifu")
+        inventory = await get("/inventory")
+        level_data = await get("/level")
 
         if user_id not in inventory or not isinstance(inventory.get(user_id), dict):
             return await send("❌ Bạn chưa có waifu nào!")
@@ -205,16 +137,14 @@ async def view_waifu_logic(user, send, send_embed, waifu_id: str):
 
         if changed:
             inventory[user_id] = user_data
-            if not save_json_atomic(INV_FILE, inventory):
-                print("[WARN] Failed to save inventory after normalize")
+            await post("/inventory/bulk_replace", {"data": inventory})
 
         if waifu_id not in waifus:
             return await send("❌ Bạn không sở hữu waifu này!")
 
         if waifu_id not in waifu_data or not isinstance(waifu_data.get(waifu_id), dict):
             if cleanup_missing_waifu(inventory, user_id, user_data, waifu_id):
-                if not save_json_atomic(INV_FILE, inventory):
-                    print("[WARN] Failed to save inventory after cleanup")
+                await post("/inventory/bulk_replace", {"data": inventory})
 
             return await send("❌ Waifu này không tồn tại!")
 
@@ -254,4 +184,6 @@ async def view_waifu_logic(user, send, send_embed, waifu_id: str):
     except Exception as e:
         print(f"[view_waifu_logic] ERROR: {e}")
         return await send("❌ Đã xảy ra lỗi khi đọc dữ liệu waifu!")
-print("Loaded view waifu has successs")
+
+
+print("Loaded view waifu (API) success")

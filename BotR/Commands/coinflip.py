@@ -6,7 +6,7 @@ from typing import Dict, Any, Union
 import discord
 from discord.ext import commands
 
-from Data import data_user
+from api_client import get, post  # 👈 dùng API
 from Commands.prayer import get_luck
 
 
@@ -16,8 +16,6 @@ choices = ["ngua", "sap"]
 
 # ===== EMOJI =====
 CUSTOM_EMOJI = {
-    # "ngua": "<a:ngua:123456>",
-    # "sap": "<a:sap:123456>",
 }
 
 UNICODE_EMOJI = {
@@ -84,7 +82,7 @@ async def _defer_if_needed(ctx, *, ephemeral: bool = False):
             pass
 
 
-# ===== SEND SAFE (FIX CHÍNH) =====
+# ===== SEND SAFE =====
 async def _send(
     ctx: Union[commands.Context, discord.Interaction],
     content=None,
@@ -120,29 +118,37 @@ async def _send(
         return None
 
 
+# ===== API HELPERS =====
+async def remove_gold(user_id: int, amount: int) -> bool:
+    res = await post(f"/users/{user_id}/gold/remove", {"amount": amount})
+    return isinstance(res, dict) and res.get("success", False)
+
+
+async def add_gold(user_id: int, amount: int):
+    await post(f"/users/{user_id}/gold/add", {"amount": amount})
+
+
+async def get_gold(user_id: int) -> int:
+    user = await get(f"/users/{user_id}")
+    if isinstance(user, dict):
+        return _safe_int(user.get("gold"))
+    return 0
+
+
 # ===== EMBED CHỜ =====
 def build_wait_embed(user):
     embed = discord.Embed(
         description="<a:coinflip:1490580450668838962>",
         color=0xf1c40f
     )
-
-    embed.set_author(
-        name="Tung đồng xu",
-        icon_url=None
-    )
-
+    embed.set_author(name="Tung đồng xu")
     return embed
 
 
 # ===== EMBED KẾT QUẢ =====
 def build_result_embed(user, choice, result, amount, reward, win, gold, spam, scale, luck):
     embed = discord.Embed()
-
-    embed.set_author(
-        name="Tung đồng xu",
-        icon_url=None
-    )
+    embed.set_author(name="Tung đồng xu")
 
     result_line = f"Kết quả: {get_emoji(result)} {pretty_side(result)}"
 
@@ -153,10 +159,8 @@ def build_result_embed(user, choice, result, amount, reward, win, gold, spam, sc
             f"🎉 Bạn đã trúng {pretty_side(choice)}\n"
             f"💰 Đã cộng thêm {reward} <a:gold:1492792339436142703>"
         )
-
         if spam >= 2:
             embed.description += f"\n⚠️ Spam → giảm thưởng x{scale:.2f}"
-
     else:
         embed.color = 0xe74c3c
         embed.description = (
@@ -165,7 +169,6 @@ def build_result_embed(user, choice, result, amount, reward, win, gold, spam, sc
         )
 
     embed.set_footer(text=f"Số dư hiện tại: {gold} <a:gold:1492792339436142703>")
-
     return embed
 
 
@@ -182,25 +185,13 @@ async def coinflip_logic(ctx, choice: str, amount: Any):
     is_slash = isinstance(ctx, discord.Interaction)
 
     if choice not in choices:
-        return await _send(
-            ctx,
-            "❌ Chỉ được nhập: Ngua hoặc Sap!",
-            ephemeral=is_slash
-        )
+        return await _send(ctx, "❌ Chỉ được nhập: Ngua hoặc Sap!", ephemeral=is_slash)
 
     if amount <= 0:
-        return await _send(
-            ctx,
-            "❌ Gold phải > 0!",
-            ephemeral=is_slash
-        )
+        return await _send(ctx, "❌ Gold phải > 0!", ephemeral=is_slash)
 
-    if not await data_user.remove_gold(uid, amount):
-        return await _send(
-            ctx,
-            "❌ Không đủ gold!",
-            ephemeral=is_slash
-        )
+    if not await remove_gold(uid, amount):
+        return await _send(ctx, "❌ Không đủ gold!", ephemeral=is_slash)
 
     delay, scale, spam = spam_control(uid)
 
@@ -213,11 +204,7 @@ async def coinflip_logic(ctx, choice: str, amount: Any):
 
     luck = _safe_int(get_luck(uid))
 
-    weights = {
-        "ngua": 1.0,
-        "sap": 1.0
-    }
-
+    weights = {"ngua": 1.0, "sap": 1.0}
     weights[choice] *= (1 + max(0, (luck - 1) / 100) * 5)
 
     result = random.choices(
@@ -230,14 +217,13 @@ async def coinflip_logic(ctx, choice: str, amount: Any):
         reward = int(amount * 1.7)
         reward = int(reward * scale)
 
-        await data_user.add_gold(uid, reward)
+        await add_gold(uid, reward)
         win = True
     else:
         reward = 0
         win = False
 
-    user_data = data_user.get_user(uid) or {}
-    gold = user_data.get("gold", 0)
+    gold = await get_gold(uid)
 
     embed = build_result_embed(
         user=user,
@@ -259,4 +245,4 @@ async def coinflip_logic(ctx, choice: str, amount: Any):
         pass
 
 
-print("Loaded coinflip has success")
+print("Loaded coinflip (API mode) has success")

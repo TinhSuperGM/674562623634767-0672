@@ -1,35 +1,27 @@
+from __future__ import annotations
+
 import asyncio
-import json
-import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional, Union
-from Data import data_user
+
 import discord
 from discord.ext import commands
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-COUPLE_FILE = os.path.join(BASE_DIR, "Data", "couple.json")
+from Data import data_user
+from api_client import get, post
 
 VN_TZ = timezone(timedelta(hours=7))
 
 
-# ===== LOAD / SAVE =====
-def load_json(file_path: str) -> Dict[str, Any]:
-    if not os.path.exists(file_path):
-        return {}
-    try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
+# ===== API LOAD / SAVE =====
+async def load_couple_data() -> Dict[str, Any]:
+    data = await get("/couple")
+    return data if isinstance(data, dict) else {}
 
 
-def save_json(file_path: str, data: Dict[str, Any]) -> None:
-    tmp = file_path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=4, ensure_ascii=False)
-    os.replace(tmp, file_path)
+async def save_couple_data(data: Dict[str, Any]) -> bool:
+    res = await post("/couple/bulk_replace", {"data": data})
+    return bool(res and res.get("success"))
 
 
 # ===== TIME =====
@@ -324,7 +316,7 @@ def build_gift_embed(user, partner_id: str, name: str, points: int) -> discord.E
 
 # ===== LOGIC =====
 async def couple_logic(bot, ctx, target: Optional[Any] = None):
-    data = load_json(COUPLE_FILE)
+    data = await load_couple_data()
     send = _send
 
     user = _get_user(ctx)
@@ -375,7 +367,7 @@ async def couple_logic(bot, ctx, target: Optional[Any] = None):
 
             if content == "yes":
                 create_couple(data, user.id, target.id)
-                save_json(COUPLE_FILE, data)
+                await save_couple_data(data)
 
                 embed = discord.Embed(
                     title="💖 Couple thành công",
@@ -407,7 +399,7 @@ async def couple_logic(bot, ctx, target: Optional[Any] = None):
 
 
 async def couple_release_logic(bot, ctx):
-    data = load_json(COUPLE_FILE)
+    data = await load_couple_data()
     send = _send
 
     user = _get_user(ctx)
@@ -419,7 +411,7 @@ async def couple_release_logic(bot, ctx):
 
     # Auto break realtime trước
     if check_auto_break(data, u1):
-        save_json(COUPLE_FILE, data)
+        await save_couple_data(data)
         return await send(ctx, "💔 Mối quan hệ này đã tự động kết thúc.")
 
     if data[u1].get("pending_break"):
@@ -428,7 +420,7 @@ async def couple_release_logic(bot, ctx):
     u2 = data[u1].get("partner")
     if not u2 or u2 not in data:
         remove_couple(data, u1, u2 or "")
-        save_json(COUPLE_FILE, data)
+        await save_couple_data(data)
         return await send(ctx, "❌ Dữ liệu couple bị lỗi và đã được dọn lại.")
 
     await send(ctx, f"<@{u2}>", embed=build_release_request_embed(user, u2))
@@ -443,7 +435,7 @@ async def couple_release_logic(bot, ctx):
 
             if content == "yes":
                 remove_couple(data, u1, u2)
-                save_json(COUPLE_FILE, data)
+                await save_couple_data(data)
 
                 embed = discord.Embed(
                     title="💔 Đã chia tay",
@@ -461,7 +453,7 @@ async def couple_release_logic(bot, ctx):
                     data[uid]["break_time"] = now
                     data[uid]["break_initiator"] = u1
 
-                save_json(COUPLE_FILE, data)
+                await save_couple_data(data)
 
                 embed = discord.Embed(
                     title="💖 Tạm hoãn chia tay",
@@ -484,7 +476,7 @@ async def couple_release_logic(bot, ctx):
             data[uid]["break_time"] = now
             data[uid]["break_initiator"] = u1
 
-        save_json(COUPLE_FILE, data)
+        await save_couple_data(data)
 
         embed = discord.Embed(
             title="⌛ Hết thời gian phản hồi",
@@ -499,7 +491,7 @@ async def couple_release_logic(bot, ctx):
 
 
 async def couple_cancel_logic(ctx):
-    data = load_json(COUPLE_FILE)
+    data = await load_couple_data()
     send = _send
 
     user = _get_user(ctx)
@@ -514,7 +506,7 @@ async def couple_cancel_logic(ctx):
     u2 = data[u1].get("partner")
     if not u2 or u2 not in data:
         remove_couple(data, u1, u2 or "")
-        save_json(COUPLE_FILE, data)
+        await save_couple_data(data)
         return await send(ctx, "❌ Dữ liệu couple bị lỗi và đã được dọn lại.")
 
     for uid in (u1, u2):
@@ -522,12 +514,12 @@ async def couple_cancel_logic(ctx):
         data[uid]["break_time"] = None
         data[uid]["break_initiator"] = None
 
-    save_json(COUPLE_FILE, data)
+    await save_couple_data(data)
     return await send(ctx, embed=build_cancel_embed(user, u2))
 
 
 async def couple_info_logic(ctx, target: Optional[Any] = None):
-    data = load_json(COUPLE_FILE)
+    data = await load_couple_data()
     send = _send
 
     viewer = _get_user(ctx)
@@ -545,7 +537,7 @@ async def couple_info_logic(ctx, target: Optional[Any] = None):
 
     # Auto break realtime trước khi hiển thị
     if check_auto_break(data, uid):
-        save_json(COUPLE_FILE, data)
+        await save_couple_data(data)
         return await send(ctx, "💔 Cặp đôi này đã tự động chia tay.")
 
     info = data[uid]
@@ -553,14 +545,14 @@ async def couple_info_logic(ctx, target: Optional[Any] = None):
 
     if not partner or partner not in data:
         remove_couple(data, uid, partner or "")
-        save_json(COUPLE_FILE, data)
+        await save_couple_data(data)
         return await send(ctx, "❌ Dữ liệu couple bị lỗi và đã được dọn lại.")
 
     return await send(ctx, embed=build_info_embed(target, info))
 
 
 async def couple_gift_logic(ctx, item: str):
-    couple_data = load_json(COUPLE_FILE)
+    couple_data = await load_couple_data()
     send = _send
 
     user = _get_user(ctx)
@@ -571,7 +563,7 @@ async def couple_gift_logic(ctx, item: str):
 
     # Auto break realtime trước
     if check_auto_break(couple_data, u1):
-        save_json(COUPLE_FILE, couple_data)
+        await save_couple_data(couple_data)
         return await send(ctx, "💔 Hai bạn đã tự động chia tay.")
 
     if couple_data[u1].get("pending_break"):
@@ -580,7 +572,7 @@ async def couple_gift_logic(ctx, item: str):
     u2 = couple_data[u1].get("partner")
     if not u2 or u2 not in couple_data:
         remove_couple(couple_data, u1, u2 or "")
-        save_json(COUPLE_FILE, couple_data)
+        await save_couple_data(couple_data)
         return await send(ctx, "❌ Dữ liệu couple bị lỗi và đã được dọn lại.")
 
     item = str(item).lower().strip()
@@ -592,20 +584,20 @@ async def couple_gift_logic(ctx, item: str):
     else:
         return await send(ctx, "❌ Item không hợp lệ. Chỉ có `rose` hoặc `cake`.")
 
-    # ===== ✅ FIX: DÙNG data_user =====
-    # trừ gold an toàn (atomic hơn)
+    # ===== ✅ FIX: DÙNG data_user async =====
     success = await data_user.remove_gold(u1, price)
 
     if not success:
         return await send(ctx, f"❌ Bạn không đủ gold để mua {name}.")
 
-    # ===== couple points vẫn giữ nguyên =====
     couple_data[u1]["points"] = int(couple_data[u1].get("points", 0)) + points
     couple_data[u2]["points"] = int(couple_data.get(u2, {}).get("points", 0)) + points
 
-    save_json(COUPLE_FILE, couple_data)
+    await save_couple_data(couple_data)
 
     return await send(ctx, embed=build_gift_embed(user, u2, name, points))
+
+
 # ===== AUTO BREAK BACKUP =====
 async def start_couple_loop(bot):
     if getattr(bot, "_couple_loop_started", False):
@@ -617,7 +609,7 @@ async def start_couple_loop(bot):
 
         while not bot.is_closed():
             try:
-                data = load_json(COUPLE_FILE)
+                data = await load_couple_data()
                 changed = False
                 processed = set()
 
@@ -654,7 +646,7 @@ async def start_couple_loop(bot):
                             pass
 
                 if changed:
-                    save_json(COUPLE_FILE, data)
+                    await save_couple_data(data)
 
             except Exception as e:
                 print("[COUPLE AUTO ERROR]", e)
@@ -664,4 +656,4 @@ async def start_couple_loop(bot):
     bot.loop.create_task(auto_break())
 
 
-print("Loaded couple has success")
+print("Loaded couple (API mode) has success")

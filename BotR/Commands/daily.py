@@ -1,14 +1,18 @@
+from __future__ import annotations
+
+import asyncio
 import discord
-from discord.ext import commands
-from Data import data_user
-import random
-import time
+import inspect
 import json
 import os
-import asyncio
-from typing import Union, Optional
+import random
+import time
+from typing import Optional, Union
+
+from discord.ext import commands
 
 from Commands.prayer import get_luck
+from Data import data_user
 
 COOLDOWN = 64800  # 18 giờ
 
@@ -17,6 +21,7 @@ DATA_DIR = os.path.join(BASE_DIR, "Data")
 RECORD_FILE = os.path.join(DATA_DIR, "reaction_record.json")
 
 RECORD_LOCK = asyncio.Lock()
+_USER_LOCKS: dict[str, asyncio.Lock] = {}
 
 
 # ===== FILE =====
@@ -38,6 +43,67 @@ def save_record(records):
     with open(temp_file, "w", encoding="utf-8") as f:
         json.dump(records, f, indent=4, ensure_ascii=False)
     os.replace(temp_file, RECORD_FILE)
+
+
+# ===== API WRAPPERS =====
+async def _maybe_await(value):
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
+async def _load_user(user_id: str) -> dict:
+    fn = getattr(data_user, "get_user_data", None) or getattr(data_user, "get_user", None)
+    if not callable(fn):
+        return {}
+    result = fn(user_id)
+    data = await _maybe_await(result)
+    return data if isinstance(data, dict) else {}
+
+
+async def _save_user(user_id: str, user: dict) -> None:
+    fn = getattr(data_user, "save_user", None) or getattr(data_user, "update_user", None)
+    if not callable(fn):
+        return
+
+    try:
+        result = fn(user_id, user)
+    except TypeError:
+        result = fn(user_id, {"data": user})
+
+    await _maybe_await(result)
+
+
+async def _add_gold(user_id: str, amount: int) -> None:
+    fn = getattr(data_user, "add_gold", None)
+    if not callable(fn):
+        return
+    result = fn(user_id, amount)
+    await _maybe_await(result)
+
+
+def _get_user_lock(user_id: str) -> asyncio.Lock:
+    fn = getattr(data_user, "get_lock", None)
+    if callable(fn):
+        try:
+            lock = fn(user_id)
+            if lock:
+                return lock
+        except Exception:
+            pass
+
+    if user_id not in _USER_LOCKS:
+        _USER_LOCKS[user_id] = asyncio.Lock()
+    return _USER_LOCKS[user_id]
+
+
+async def _get_luck(user_id: str) -> float:
+    try:
+        result = get_luck(user_id)
+        value = await _maybe_await(result)
+        return float(value if value is not None else 1.0)
+    except Exception:
+        return 1.0
 
 
 # ===== FORMAT =====
@@ -359,8 +425,9 @@ class ClickEventView(discord.ui.View):
         combo_bonus = 0
         is_new = False
 
-        async with data_user.get_lock(self.user_id):
-            user = data_user.get_user(self.user_id)
+        user_lock = _get_user_lock(self.user_id)
+        async with user_lock:
+            user = await _load_user(self.user_id)
 
             combo = int(user.get("reaction_combo", 0))
 
@@ -408,11 +475,10 @@ class ClickEventView(discord.ui.View):
                     reward += 500
 
             user["reaction_combo"] = combo
-            data_user.save_user(self.user_id, user)
+            await _save_user(self.user_id, user)
 
-        # FIX: cộng gold bên ngoài lock để tránh deadlock do add_gold() tự lock cùng user
         try:
-            await data_user.add_gold(self.user_id, reward)
+            await _add_gold(self.user_id, reward)
         except Exception as e:
             print(f"[daily.click] add_gold error: {e}")
 
@@ -452,7 +518,6 @@ class ClickEventView(discord.ui.View):
 
 # ===== MAIN =====
 async def daily_logic(ctx):
-    # FIX: defer sớm cho slash command để tránh timeout khi flow hơi lâu
     if isinstance(ctx, discord.Interaction) and not ctx.response.is_done():
         try:
             await ctx.response.defer(thinking=True)
@@ -463,9 +528,9 @@ async def daily_logic(ctx):
     user_id = str(user_obj.id)
     now = int(time.time())
 
-    # Chỉ giữ lock cho phần đọc/ghi state, không gọi add_gold() bên trong lock
-    async with data_user.get_lock(user_id):
-        user = data_user.get_user(user_id)
+    user_lock = _get_user_lock(user_id)
+    async with user_lock:
+        user = await _load_user(user_id)
 
         last = int(user.get("last_daily", 0))
         remaining = COOLDOWN - (now - last)
@@ -498,21 +563,19 @@ async def daily_logic(ctx):
         streak += 1
         streak_bonus = min(streak * 20, 500)
 
-        luck = float(get_luck(user_obj.id))
+        luck = float(await _get_luck(user_obj.id))
         reward = roll_gold(luck)
         total_reward = reward + streak_bonus
 
         user["last_daily"] = now
         user["daily_streak"] = streak
-        data_user.save_user(user_id, user)
+        await _save_user(user_id, user)
 
-    # FIX: add_gold ra ngoài lock để không tự chờ lock của chính nó
     try:
-        await data_user.add_gold(user_id, total_reward)
+        await _add_gold(user_id, total_reward)
     except Exception as e:
         print(f"[daily_logic] add_gold error: {e}")
 
-    # ===== EVENT =====
     if random.random() < 0.1:
         preview_reward = max(200, total_reward // 2)
         preparing_embed = build_event_prepare_embed(user_obj, preview_reward)

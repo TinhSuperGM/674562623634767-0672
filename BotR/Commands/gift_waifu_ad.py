@@ -1,38 +1,10 @@
 import discord
-import json
-import os
 import asyncio
-from Data.data_admin import ADMINS
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-WAIFU_FILE = os.path.join(BASE_DIR, "Data", "waifu_data.json")
-INV_FILE = os.path.join(BASE_DIR, "Data", "inventory.json")
+from Data.data_admin import ADMINS
+from api_client import get, post  # 👈 dùng API
 
 FILE_LOCK = asyncio.Lock()
-
-
-# ===== JSON SAFE =====
-def load_json(path):
-    if not os.path.exists(path):
-        return {}
-
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            return data if isinstance(data, dict) else {}
-    except Exception as e:
-        print(f"[gift_waifu_ad] load error {path}: {e}")
-        return {}
-
-
-def save_json(path, data):
-    tmp = path + ".tmp"
-    try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=4, ensure_ascii=False)
-        os.replace(tmp, path)
-    except Exception as e:
-        print(f"[gift_waifu_ad] save error {path}: {e}")
 
 
 # ===== INTERACTION SAFE =====
@@ -59,8 +31,9 @@ async def gift_waifu_ad_logic(interaction, waifu_id: str, user: discord.User = N
         )
 
     async with FILE_LOCK:
-        waifu_data = load_json(WAIFU_FILE)
-        inventory = load_json(INV_FILE)
+        # ===== LOAD DATA FROM API =====
+        waifu_data = await get("/waifu")
+        inventory = await get("/inventory")
 
         if waifu_id not in waifu_data:
             return await safe_send(interaction, "❌ Waifu không tồn tại!", True)
@@ -100,9 +73,9 @@ async def gift_waifu_ad_logic(interaction, waifu_id: str, user: discord.User = N
         if quantity != -1:
             waifu["claimed"] = claimed + 1
 
-        # ===== SAVE =====
-        save_json(INV_FILE, inventory)
-        save_json(WAIFU_FILE, waifu_data)
+        # ===== SAVE BACK TO API =====
+        await post("/inventory/bulk_replace", {"data": inventory})
+        await post("/waifu/bulk_replace", {"data": waifu_data})
 
     # ===== RESPONSE =====
     await safe_send(

@@ -1,7 +1,7 @@
+from __future__ import annotations
+
 import asyncio
 import copy
-import json
-import os
 import random
 import re
 import time
@@ -9,15 +9,8 @@ from threading import Lock
 from typing import Dict, List, Optional, Set, Tuple, Union
 
 import discord
-from discord.ext import commands
+from api_client import get as api_get, post as api_post
 from Data import data_user
-
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-INV_FILE = os.path.join(BASE_DIR, "Data", "inventory.json")
-TEAM_FILE = os.path.join(BASE_DIR, "Data", "team.json")
-WAIFU_FILE = os.path.join(BASE_DIR, "Data", "waifu_data.json")
-COOLDOWN_FILE = os.path.join(BASE_DIR, "Data", "cooldown.json")
 
 MAX_ROUNDS = 30
 ACTION_DELAY = 2
@@ -43,6 +36,7 @@ COOLDOWN_LOCK = Lock()
 
 ACTIVE_BATTLE_USERS: Set[str] = set()
 COOLDOWNS: Dict[str, float] = {}
+COOLDOWNS_LOADED = False
 
 RANK_ORDER = [
     "limited",
@@ -81,65 +75,51 @@ LIFESTEAL_BASE = {
 }
 
 
-# ===== JSON =====
-def load_json(path):
-    if not os.path.exists(path):
-        return {}
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            return data if isinstance(data, dict) else {}
-    except Exception as e:
-        print(f"[fight.py] load_json error: {path} -> {e}")
-        return {}
+async def load_inventory_db() -> Dict[str, Any]:
+    data = await api_get("/inventory")
+    return data if isinstance(data, dict) else {}
 
 
-def _atomic_write_json(path, data):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp_path = f"{path}.tmp"
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=4, ensure_ascii=False)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp_path, path)
+async def load_waifu_db() -> Dict[str, Any]:
+    data = await api_get("/waifu")
+    return data if isinstance(data, dict) else {}
 
 
-def save_json(path, data):
-    try:
-        _atomic_write_json(path, data)
-    except Exception as e:
-        print(f"[fight.py] save_json error: {path} -> {e}")
+async def load_team_db() -> Dict[str, Any]:
+    data = await api_get("/team")
+    return data if isinstance(data, dict) else {}
 
 
-def load_cooldowns() -> Dict[str, float]:
-    with COOLDOWN_LOCK:
-        raw = load_json(COOLDOWN_FILE)
-        out: Dict[str, float] = {}
-        now = time.time()
+async def ensure_cooldowns_loaded():
+    global COOLDOWNS_LOADED, COOLDOWNS
+    if COOLDOWNS_LOADED:
+        return
 
+    raw = await api_get("/cooldown")
+    out: Dict[str, float] = {}
+    now = time.time()
+
+    if isinstance(raw, dict):
         for key, value in raw.items():
             try:
                 expiry = float(value)
             except Exception:
                 continue
-
             if expiry > now:
                 out[str(key)] = expiry
 
-        return out
+    with COOLDOWN_LOCK:
+        COOLDOWNS = out
+
+    COOLDOWNS_LOADED = True
 
 
-def save_cooldowns(data: Dict[str, float]):
-    try:
-        _atomic_write_json(COOLDOWN_FILE, data)
-    except Exception as e:
-        print(f"[fight.py] save_cooldowns error: {COOLDOWN_FILE} -> {e}")
+async def save_cooldowns_to_api():
+    with COOLDOWN_LOCK:
+        snapshot = dict(COOLDOWNS)
+    await api_post("/cooldown/bulk_replace", {"data": snapshot})
 
 
-COOLDOWNS = load_cooldowns()
-
-
-# ===== DISCORD =====
 def get_user_obj(ctx):
     return getattr(ctx, "user", None) or getattr(ctx, "author", None)
 
@@ -191,7 +171,6 @@ async def edit_like(msg, content=None, embed=None, view=None):
         return None
 
 
-# ===== TEAM SAFE =====
 def normalize_team(team):
     if isinstance(team, list):
         return [str(x) for x in team if isinstance(x, (str, int))]
@@ -255,7 +234,6 @@ def normalize_team_ids(inv, uid, team_data=None):
     return out
 
 
-# ===== LOVE =====
 def _ensure_waifus_dict(user_record: dict) -> dict:
     waifus = user_record.get("waifus", {})
     if isinstance(waifus, list):
@@ -313,7 +291,6 @@ def drop_love(inv, uid, wid):
     return new
 
 
-# ===== STATS HELPERS =====
 def fmt_pct(value: float) -> str:
     try:
         return f"{max(0.0, float(value)) * 100:.0f}%"
@@ -343,7 +320,6 @@ def team_text(team: List[dict]) -> str:
     return "\n".join(out)
 
 
-# ===== COOLDOWN =====
 def _battle_key(uid1: str, uid2: str) -> str:
     return "|".join(sorted((str(uid1), str(uid2))))
 
@@ -372,7 +348,7 @@ def is_on_cooldown(uid1: str, uid2: str) -> Tuple[bool, int]:
         return True, remain
 
 
-def set_cooldown(uid1: str, uid2: str, hours: int = COOLDOWN_HOURS):
+async def set_cooldown(uid1: str, uid2: str, hours: int = COOLDOWN_HOURS):
     with COOLDOWN_LOCK:
         now = time.time()
 
@@ -385,12 +361,10 @@ def set_cooldown(uid1: str, uid2: str, hours: int = COOLDOWN_HOURS):
 
         key = _battle_key(uid1, uid2)
         COOLDOWNS[key] = now + hours * 3600
-        snapshot = dict(COOLDOWNS)
 
-    save_cooldowns(snapshot)
+    await save_cooldowns_to_api()
 
 
-# ===== GOLD =====
 def get_gold_rate_by_turn(t):
     t = max(1, int(t))
 
@@ -414,7 +388,8 @@ async def transfer_gold_safely(winner_uid: str, loser_uid: str, bonus: int) -> i
 
     async with GOLD_LOCK:
         try:
-            loser_gold = int((data_user.get_user(loser_uid) or {}).get("gold", 0))
+            loser_data = await data_user.get_user_data(loser_uid)
+            loser_gold = int((loser_data or {}).get("gold", 0))
         except Exception as e:
             print(f"[fight.py] get_user gold error: {e}")
             loser_gold = 0
@@ -443,7 +418,6 @@ async def transfer_gold_safely(winner_uid: str, loser_uid: str, bonus: int) -> i
             return 0
 
 
-# ===== BATTLE HELPERS =====
 def get_battle_crit_chance(rank: str, love: int, level: int) -> float:
     base = CRIT_BASE.get(rank, 0.04)
     bonus_level = max(0, int(level) - 1) * 0.01
@@ -479,7 +453,6 @@ def get_crit_heal_amount(max_hp: int, is_combo: bool = False) -> int:
     return max(1, int(max_hp * random.uniform(CRIT_HEAL_MIN, CRIT_HEAL_MAX)))
 
 
-# ===== COMBATANT =====
 def build_char(uid, wid, inv, waifu):
     if not isinstance(wid, (str, int)):
         return None
@@ -527,7 +500,6 @@ def build_char(uid, wid, inv, waifu):
     }
 
 
-# ===== UI =====
 class SpeedView(discord.ui.View):
     def __init__(self, session, timeout: Optional[float] = None):
         super().__init__(timeout=timeout)
@@ -565,10 +537,7 @@ class SpeedView(discord.ui.View):
         if getattr(self.session, "finished", False):
             try:
                 if not interaction.response.is_done():
-                    await interaction.response.send_message(
-                        "❌ Trận đã kết thúc.",
-                        ephemeral=True,
-                    )
+                    await interaction.response.send_message("❌ Trận đã kết thúc.", ephemeral=True)
             except Exception:
                 pass
             return False
@@ -590,10 +559,7 @@ class SpeedView(discord.ui.View):
         if now - last < 0.5:
             try:
                 if not interaction.response.is_done():
-                    await interaction.response.send_message(
-                        "⏳ Bấm chậm lại một chút.",
-                        ephemeral=True,
-                    )
+                    await interaction.response.send_message("⏳ Bấm chậm lại một chút.", ephemeral=True)
             except Exception:
                 pass
             return False
@@ -626,7 +592,6 @@ class SpeedView(discord.ui.View):
                 print(f"[fight.py] view timeout edit error: {e}")
 
 
-# ===== SESSION =====
 class FightSession:
     def __init__(self, ctx, uid1, uid2, ta, tb, inv, waifu, na, nb):
         self.ctx = ctx
@@ -856,35 +821,54 @@ class FightSession:
         if not self.love_drop_targets:
             return
 
+        grouped: Dict[str, Set[str]] = {}
+        for uid, wid in self.love_drop_targets:
+            grouped.setdefault(str(uid), set()).add(str(wid))
+
         async with INV_LOCK:
-            latest = load_json(INV_FILE)
+            latest_all = await load_inventory_db()
+            if not isinstance(latest_all, dict):
+                latest_all = {}
 
-            for uid, wid in self.love_drop_targets:
-                uid = str(uid)
-                wid = str(wid)
+            for uid, wids in grouped.items():
+                user_inv = latest_all.get(uid, {})
+                if not isinstance(user_inv, dict):
+                    user_inv = {}
 
-                user = latest.setdefault(uid, {})
-                waifus = _ensure_waifus_dict(user)
+                waifus = user_inv.get("waifus", {})
+                if isinstance(waifus, list):
+                    waifus = {str(w): 0 for w in waifus}
+                elif not isinstance(waifus, dict):
+                    waifus = {}
 
-                current = waifus.get(wid, 0)
-                if isinstance(current, dict):
-                    current_love = current.get("love", current.get("amount", 0))
-                else:
-                    current_love = current
+                for wid in wids:
+                    current = waifus.get(wid, 0)
+                    if isinstance(current, dict):
+                        current_love = current.get("love", current.get("amount", 0))
+                    else:
+                        current_love = current
 
-                try:
-                    current_love = max(0, int(current_love))
-                except Exception:
-                    current_love = 0
+                    try:
+                        current_love = max(0, int(current_love))
+                    except Exception:
+                        current_love = 0
 
-                new_love = max(0, int(current_love * (1 - LOVE_DROP_RATE)))
-                set_love(latest, uid, wid, new_love)
+                    new_love = max(0, int(current_love * (1 - LOVE_DROP_RATE)))
 
-            save_json(INV_FILE, latest)
-            self.inv = latest
+                    if isinstance(waifus.get(wid), dict):
+                        waifus[wid]["love"] = new_love
+                        if "amount" in waifus[wid]:
+                            waifus[wid]["amount"] = new_love
+                    else:
+                        waifus[wid] = new_love
+
+                await api_post(f"/inventory/{uid}/update", {"data": {"waifus": waifus}})
+                user_inv["waifus"] = waifus
+                latest_all[uid] = user_inv
+
+            self.inv = latest_all
 
 
-# ===== MAIN =====
 def _resolve_opponent(opponent):
     if opponent is None:
         return None, None
@@ -906,6 +890,7 @@ def _resolve_opponent(opponent):
 
 async def fight_logic(ctx, opponent):
     await _defer_if_interaction(ctx)
+    await ensure_cooldowns_loaded()
 
     user = get_user_obj(ctx)
     if not user:
@@ -935,9 +920,9 @@ async def fight_logic(ctx, opponent):
 
     try:
         async with INV_LOCK:
-            inv = load_json(INV_FILE)
-            waifu = load_json(WAIFU_FILE)
-            team = load_json(TEAM_FILE)
+            inv = await load_inventory_db()
+            waifu = await load_waifu_db()
+            team = await load_team_db()
 
         if str(uid1) not in inv or str(uid2) not in inv:
             return await send_like(ctx, content="❌ Một trong hai người chưa có inventory.")
@@ -979,7 +964,7 @@ async def fight_logic(ctx, opponent):
 
         if not win:
             await session.commit()
-            set_cooldown(uid1, uid2)
+            await set_cooldown(uid1, uid2)
 
             result_embed = discord.Embed(
                 title="Kết quả",
@@ -1000,7 +985,8 @@ async def fight_logic(ctx, opponent):
         loser = uid2 if win == "a" else uid1
 
         try:
-            loser_gold = int((data_user.get_user(loser) or {}).get("gold", 0))
+            loser_data = await data_user.get_user_data(loser)
+            loser_gold = int((loser_data or {}).get("gold", 0))
         except Exception:
             loser_gold = 0
 
@@ -1008,7 +994,7 @@ async def fight_logic(ctx, opponent):
         transferred = await transfer_gold_safely(winner, loser, bonus)
 
         await session.commit()
-        set_cooldown(uid1, uid2)
+        await set_cooldown(uid1, uid2)
 
         win_name = session.get_side_name(win)
         lose_name = session.get_side_name("b" if win == "a" else "a")

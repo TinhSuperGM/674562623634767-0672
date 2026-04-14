@@ -1,6 +1,5 @@
 import time
 import random
-from Data import data_user
 
 MAX_LUCK = 5.0
 DEFAULT_LUCK = 1.0
@@ -20,14 +19,19 @@ async def _send(ctx, msg):
 
 
 # ===== GET LUCK =====
-def get_luck(user_id: int) -> float:
-    user = data_user.get_user(str(user_id))
+async def get_luck(user_id: int) -> float:
+    from Data.api_client import (
+    get_user_data,
+    update_user,
+    add_gold
+    )
+    user = await get_user_data(str(user_id))
     return round(user.get("luck", DEFAULT_LUCK), 2)
 
 
 # ===== MAIN =====
 async def prayer_logic(ctx):
-    # Defer sớm cho slash command để tránh timeout nếu I/O chậm
+    # Defer sớm cho slash command để tránh timeout nếu API chậm
     if hasattr(ctx, "response") and not ctx.response.is_done():
         try:
             await ctx.response.defer(thinking=False)
@@ -38,10 +42,10 @@ async def prayer_logic(ctx):
     uid = str(user_obj.id)
     now = int(time.time())
 
-    # ===== LOAD USER =====
-    user = data_user.get_user(uid)
+    # ===== LOAD USER (API) =====
+    user = await get_user_data(uid)
 
-    # ensure fields
+    # ensure fields (KHÔNG phá schema)
     user.setdefault("gold", 0)
     user.setdefault("luck", DEFAULT_LUCK)
     user.setdefault("last_pray", 0)
@@ -55,12 +59,12 @@ async def prayer_logic(ctx):
         minutes = (remain % 3600) // 60
         return await _send(ctx, f"🛐 Bạn cần chờ {hours}h {minutes}m để cầu nguyện tiếp.")
 
-    # ===== SET COOLDOWN (SAVE NGAY) =====
+    # ===== SET COOLDOWN =====
     user["last_pray"] = now
     try:
-        data_user.save_user(uid, user)
+        await update_user(uid, {"last_pray": now})
     except Exception as e:
-        print(f"[prayer_logic.save_user] {e}")
+        print(f"[prayer_logic.update_user] {e}")
         return await _send(ctx, "❌ Có lỗi khi lưu dữ liệu, vui lòng thử lại.")
 
     roll = random.random()
@@ -70,7 +74,7 @@ async def prayer_logic(ctx):
         gold = random.randint(300, 1000)
 
         try:
-            await data_user.add_gold(uid, gold)
+            await add_gold(uid, gold)
         except Exception as e:
             print(f"[prayer_logic.add_gold+] {e}")
             return await _send(ctx, "❌ Có lỗi khi cộng gold, vui lòng thử lại.")
@@ -86,7 +90,7 @@ async def prayer_logic(ctx):
         gold = random.randint(300, 1000)
 
         try:
-            await data_user.add_gold(uid, -gold)
+            await add_gold(uid, -gold)
         except Exception as e:
             print(f"[prayer_logic.add_gold-] {e}")
             return await _send(ctx, "❌ Có lỗi khi trừ gold, vui lòng thử lại.")
@@ -103,10 +107,9 @@ async def prayer_logic(ctx):
 
         if current_luck < MAX_LUCK:
             current_luck = round(min(MAX_LUCK, current_luck + 0.1), 2)
-            user["luck"] = current_luck
 
             try:
-                data_user.save_user(uid, user)
+                await update_user(uid, {"luck": current_luck})
             except Exception as e:
                 print(f"[prayer_logic.save_luck] {e}")
                 return await _send(ctx, "❌ Có lỗi khi lưu luck, vui lòng thử lại.")
@@ -124,4 +127,4 @@ async def prayer_logic(ctx):
         )
 
 
-print("Loaded prayer has success")
+print("Loaded prayer (API) has success")

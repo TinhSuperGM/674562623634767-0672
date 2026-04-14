@@ -1,92 +1,112 @@
 import asyncio
 import copy
-import json
-import os
 import random
 import time
-from threading import Lock
 from typing import Any, Dict, Optional
 
+import aiohttp
 import discord
 from discord.ui import Button, Modal, TextInput, View
 
 from Commands.prayer import get_luck
-from Data import data_user
 from Data.level import sync_all
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+API_BASE_URL = "http://127.0.0.1:5000"
 
-CHANNEL_FILE = os.path.join(BASE_DIR, "Data", "auction_channels.json")
-AUCTION_FILE = os.path.join(BASE_DIR, "Data", "auction.json")
-WAIFU_FILE = os.path.join(BASE_DIR, "Data", "waifu_data.json")
-INV_FILE = os.path.join(BASE_DIR, "Data", "inventory.json")
-
-_FILE_LOCK = Lock()
+_USER_LOCKS: Dict[str, asyncio.Lock] = {}
+_API_SESSION: Optional[aiohttp.ClientSession] = None
 
 
-# =========================
-# SAFE JSON
-# =========================
-def _ensure_json(path: str, default):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    if not os.path.exists(path):
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(default, f, indent=4, ensure_ascii=False)
+def _get_user_lock(user_id: str) -> asyncio.Lock:
+    lock = _USER_LOCKS.get(user_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _USER_LOCKS[user_id] = lock
+    return lock
 
 
-def _safe_load(path: str, default):
-    _ensure_json(path, default)
+async def _get_session() -> aiohttp.ClientSession:
+    global _API_SESSION
+    if _API_SESSION is None or _API_SESSION.closed:
+        _API_SESSION = aiohttp.ClientSession()
+    return _API_SESSION
+
+
+async def _api_get(endpoint: str, params: Optional[Dict[str, Any]] = None):
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else default
-    except Exception:
-        return default
+        session = await _get_session()
+        async with session.get(f"{API_BASE_URL}{endpoint}", params=params, timeout=15) as res:
+            if res.status >= 400:
+                return None
+            return await res.json()
+    except Exception as e:
+        print("[API GET ERROR]", endpoint, e)
+        return None
 
 
-def _safe_save(path: str, data):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = f"{path}.tmp"
-    with _FILE_LOCK:
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=4, ensure_ascii=False)
-        os.replace(tmp, path)
+async def _api_post(endpoint: str, payload: Optional[Dict[str, Any]] = None):
+    try:
+        session = await _get_session()
+        async with session.post(f"{API_BASE_URL}{endpoint}", json=payload or {}, timeout=15) as res:
+            if res.status >= 400:
+                return None
+            return await res.json()
+    except Exception as e:
+        print("[API POST ERROR]", endpoint, e)
+        return None
 
 
-def load_channels():
-    return _safe_load(CHANNEL_FILE, {})
+def _ensure_dict(data):
+    return data if isinstance(data, dict) else {}
 
 
-def save_channels(data):
-    _safe_save(CHANNEL_FILE, data)
+async def load_channels():
+    data = await _api_get("/auction-channels")
+    return _ensure_dict(data)
 
 
-def load_auctions():
-    return _safe_load(AUCTION_FILE, {})
+async def save_channels(data):
+    return await _api_post("/auction-channels/bulk_replace", {"data": data})
 
 
-def save_auctions(data):
-    _safe_save(AUCTION_FILE, data)
+async def load_auctions():
+    data = await _api_get("/auction")
+    return _ensure_dict(data)
 
 
-def load_inventory():
-    return _safe_load(INV_FILE, {})
+async def save_auctions(data):
+    return await _api_post("/auction/bulk_replace", {"data": data})
 
 
-def save_inventory(data):
-    _safe_save(INV_FILE, data)
+async def load_inventory():
+    data = await _api_get("/inventory")
+    return _ensure_dict(data)
 
 
-def load_waifu_data():
-    return _safe_load(WAIFU_FILE, {})
+async def save_inventory(data):
+    return await _api_post("/inventory/bulk_replace", {"data": data})
 
 
-def save_waifu_data(data):
-    _safe_save(WAIFU_FILE, data)
+async def load_waifu_data():
+    data = await _api_get("/waifu")
+    return _ensure_dict(data)
+
+
+async def save_waifu_data(data):
+    return await _api_post("/waifu/bulk_replace", {"data": data})
+
+
+async def get_user_data(user_id: str) -> Dict[str, Any]:
+    data = await _api_get(f"/users/{user_id}")
+    return _ensure_dict(data)
+
+
+async def save_user_data(user_id: str, user_data: Dict[str, Any]):
+    return await _api_post(f"/users/{user_id}/update", {"data": user_data})
 
 
 # =========================
-# RESPOND HELPERS
+# SAFE HELPERS
 # =========================
 async def _defer_if_needed(interaction: discord.Interaction, *, ephemeral: bool = True):
     try:
@@ -165,7 +185,7 @@ async def setup_channel_logic(interaction, type: str, channel_id: str):
     }
     type = type_alias.get(type, type)
 
-    channels = load_channels()
+    channels = await load_channels()
     guild_key = str(guild.id)
 
     if guild_key not in channels or not isinstance(channels.get(guild_key), dict):
@@ -173,7 +193,7 @@ async def setup_channel_logic(interaction, type: str, channel_id: str):
 
     if type == "auction":
         old_channel_id = channels[guild_key].get("auction_channel_id")
-        auctions = load_auctions()
+        auctions = await load_auctions()
 
         if old_channel_id and int(old_channel_id) != ch_id:
             try:
@@ -200,10 +220,10 @@ async def setup_channel_logic(interaction, type: str, channel_id: str):
 
                         auction.pop(msg_key, None)
 
-                save_auctions(auctions)
+                await save_auctions(auctions)
 
         channels[guild_key]["auction_channel_id"] = ch_id
-        save_channels(channels)
+        await save_channels(channels)
         return await _respond(
             interaction,
             f"✅ Set kênh đấu giá: {channel.mention}",
@@ -212,7 +232,7 @@ async def setup_channel_logic(interaction, type: str, channel_id: str):
 
     if type == "ranking":
         channels[guild_key]["leaderboard_channel_id"] = ch_id
-        save_channels(channels)
+        await save_channels(channels)
         return await _respond(
             interaction,
             f"✅ Set kênh BXH: {channel.mention}",
@@ -221,7 +241,7 @@ async def setup_channel_logic(interaction, type: str, channel_id: str):
 
     if type == "shop":
         channels[guild_key]["shop_channel_id"] = ch_id
-        save_channels(channels)
+        await save_channels(channels)
         return await _respond(
             interaction,
             f"✅ Set kênh shop: {channel.mention}",
@@ -230,7 +250,7 @@ async def setup_channel_logic(interaction, type: str, channel_id: str):
 
     if type in ("roll", "roll_waifu"):
         channels[guild_key]["roll_waifu_channel_id"] = ch_id
-        save_channels(channels)
+        await save_channels(channels)
         return await _respond(
             interaction,
             f"✅ Set kênh roll waifu: {channel.mention}",
@@ -341,11 +361,7 @@ def build_roll_embed():
 
 async def _rollback_user_snapshot(user_id: str, snapshot: Dict[str, Any]):
     try:
-        data_user.save_user(user_id, snapshot)
-    except Exception:
-        pass
-    try:
-        data_user.save_data()
+        await save_user_data(user_id, snapshot)
     except Exception:
         pass
 
@@ -357,10 +373,10 @@ async def roll_waifu_logic(ctx, mode: str):
     user_obj = getattr(ctx, "user", getattr(ctx, "author", None))
     user_id = str(user_obj.id)
 
-    lock = data_user.get_lock(user_id)
+    lock = _get_user_lock(user_id)
     async with lock:
-        waifu_data = load_waifu_data()
-        inventory = load_inventory()
+        waifu_data = await load_waifu_data()
+        inventory = await load_inventory()
 
         user_inv = _ensure_inventory_schema(inventory, user_id)
 
@@ -368,7 +384,7 @@ async def roll_waifu_logic(ctx, mode: str):
         if mode not in cost_map:
             return await _respond(ctx, "❌ Mode không hợp lệ!", ephemeral=True)
 
-        user_before = copy.deepcopy(data_user.get_user(user_id))
+        user_before = copy.deepcopy(await get_user_data(user_id))
         luck = get_luck(user_obj.id) if callable(get_luck) else 0
 
         spent = 0
@@ -389,11 +405,7 @@ async def roll_waifu_logic(ctx, mode: str):
                 return await _respond(ctx, "❌ Không đủ gold!", ephemeral=True)
 
             user_before["gold"] = current_gold - cost
-            data_user.save_user(user_id, user_before)
-            try:
-                data_user.save_data()
-            except Exception:
-                pass
+            await save_user_data(user_id, user_before)
             spent = cost
 
         rank = roll_rank(mode, luck)
@@ -422,33 +434,27 @@ async def roll_waifu_logic(ctx, mode: str):
                 waifu["claimed"] = int(waifu.get("claimed", 0) or 0) + 1
                 waifu_data[waifu_id] = waifu
 
-            save_inventory(inventory)
-            save_waifu_data(waifu_data)
+            await save_inventory(inventory)
+            await save_waifu_data(waifu_data)
 
             if free_consumed:
-                user_now = data_user.get_user(user_id)
+                user_now = await get_user_data(user_id)
                 user_now["last_free"] = time.time()
-                data_user.save_user(user_id, user_now)
-
-            try:
-                data_user.save_data()
-            except Exception:
-                raise
+                await save_user_data(user_id, user_now)
 
         except Exception:
             if spent > 0:
                 await _rollback_user_snapshot(user_id, user_before)
 
             try:
-                save_inventory(inv_before)
-                save_waifu_data(waifu_before)
+                await save_inventory(inv_before)
+                await save_waifu_data(waifu_before)
             except Exception:
                 pass
 
             if free_consumed:
                 try:
-                    data_user.save_user(user_id, user_before)
-                    data_user.save_data()
+                    await save_user_data(user_id, user_before)
                 except Exception:
                     pass
 
@@ -514,7 +520,7 @@ async def send_roll_embed_logic(interaction, channel_id: str):
         return await _respond(interaction, "❌ Phải là text channel", ephemeral=True)
 
     embed = build_roll_embed()
-    channels = load_channels()
+    channels = await load_channels()
     guild_key = str(interaction.guild.id)
     if guild_key not in channels or not isinstance(channels.get(guild_key), dict):
         channels[guild_key] = {}
@@ -541,7 +547,7 @@ async def send_roll_embed_logic(interaction, channel_id: str):
         sent_msg = await channel.send(embed=embed, view=RollView())
         channels[guild_key]["roll_waifu_message_id"] = sent_msg.id
         channels[guild_key]["roll_waifu_channel_id"] = channel.id
-        save_channels(channels)
+        await save_channels(channels)
 
     if interaction.response.is_done():
         await interaction.followup.send(f"✅ Đã gửi roll panel vào {channel.mention}", ephemeral=True)
@@ -578,34 +584,32 @@ class QuantityModal(Modal):
         user_id = str(interaction.user.id)
         total = self.price * qty
 
-        lock = data_user.get_lock(user_id)
+        lock = _get_user_lock(user_id)
         async with lock:
-            user_before = copy.deepcopy(data_user.get_user(user_id))
+            user_before = copy.deepcopy(await get_user_data(user_id))
 
             if int(user_before.get("gold", 0) or 0) < total:
                 return await _respond(interaction, f"❌ Không đủ {total} gold!", ephemeral=True)
 
-            user_now = data_user.get_user(user_id)
+            user_now = await get_user_data(user_id)
             user_now["gold"] = int(user_now.get("gold", 0) or 0) - total
-            data_user.save_user(user_id, user_now)
+            await save_user_data(user_id, user_now)
 
-            inv_before = load_inventory()
+            inv_before = await load_inventory()
             inv_data = copy.deepcopy(inv_before)
             user_inv = _ensure_inventory_schema(inv_data, user_id)
 
             try:
                 user_inv["bag_item"][self.item] = user_inv["bag_item"].get(self.item, 0) + qty
-                save_inventory(inv_data)
-                data_user.save_data()
+                await save_inventory(inv_data)
             except Exception:
                 try:
-                    data_user.save_user(user_id, user_before)
-                    data_user.save_data()
+                    await save_user_data(user_id, user_before)
                 except Exception:
                     pass
 
                 try:
-                    save_inventory(inv_before)
+                    await save_inventory(inv_before)
                 except Exception:
                     pass
 
@@ -671,13 +675,13 @@ async def send_shop_embed_logic(interaction, channel_id: str):
 
     sent = await ch.send(embed=embed, view=ShopView())
 
-    channels = load_channels()
+    channels = await load_channels()
     guild_key = str(interaction.guild.id)
     if guild_key not in channels or not isinstance(channels.get(guild_key), dict):
         channels[guild_key] = {}
     channels[guild_key]["shop_channel_id"] = ch.id
     channels[guild_key]["shop_message_id"] = sent.id
-    save_channels(channels)
+    await save_channels(channels)
 
     return await _respond(interaction, f"✅ Đã gửi shop vào {ch.mention}", ephemeral=True)
 

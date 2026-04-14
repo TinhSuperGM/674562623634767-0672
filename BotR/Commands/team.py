@@ -1,60 +1,22 @@
 import asyncio
-import json
-import os
 from typing import Optional
 
 import discord
 
-# Import lock chung từ fight để team/fight thật sự sync với nhau.
-# Lưu ý: nếu project của bạn dùng path khác, đổi lại cho đúng structure.
 from Commands.fight import INV_LOCK
-
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-INV_FILE = os.path.join(BASE_DIR, "Data", "inventory.json")
-TEAM_FILE = os.path.join(BASE_DIR, "Data", "team.json")
-WAIFU_FILE = os.path.join(BASE_DIR, "Data", "waifu_data.json")
+from api_client import get, post
 
 TEAM_LOCK = asyncio.Lock()
-_LAST_SET = {}  # uid -> monotonic time
+_LAST_SET = {}
 
 
-# ===== JSON SAFE =====
-def load_json(path):
-    if not os.path.exists(path):
-        return {}
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            return data if isinstance(data, dict) else {}
-    except Exception as e:
-        print(f"[team.py] load_json error: {path} -> {e}")
-        return {}
-
-
-def _atomic_write_json(path, data):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp_path = f"{path}.tmp"
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=4, ensure_ascii=False)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp_path, path)
-
-
-def save_json(path, data):
-    try:
-        _atomic_write_json(path, data)
-    except Exception as e:
-        print(f"[team.py] save_json error: {path} -> {e}")
-
+# ===== HELPERS =====
 def resolve_waifu_id(input_id: str, waifu_data: dict, user_waifus: dict):
     input_id = str(input_id).lower()
 
-    # 1. nếu user nhập đúng ID
     if input_id in user_waifus:
         return input_id
 
-    # 2. match theo name
     for wid, meta in waifu_data.items():
         name = str(meta.get("name", "")).lower()
         display = str(meta.get("display_name", "")).lower()
@@ -64,87 +26,42 @@ def resolve_waifu_id(input_id: str, waifu_data: dict, user_waifus: dict):
                 return wid
 
     return None
+
+
+def get_user_obj(ctx):
+    return getattr(ctx, "user", None) or getattr(ctx, "author", None)
+
+
 async def resolve_target_user(ctx, target):
-    # 1. Ưu tiên param (slash command)
     if target:
         return target
 
-    # 2. PREFIX: check reply
     if hasattr(ctx, "message") and ctx.message:
         ref = getattr(ctx.message, "reference", None)
         if ref and ref.resolved and getattr(ref.resolved, "author", None):
             return ref.resolved.author
 
-        # 3. check mention trong message
         mentions = getattr(ctx.message, "mentions", [])
         if mentions:
             return mentions[0]
 
-        # 4. check ID trong text
-        content = ctx.message.content or ""
-        import re
-        match = re.search(r"\d{17,20}", content)
-        if match:
-            uid = int(match.group())
-            guild = getattr(ctx, "guild", None)
-            if guild:
-                member = guild.get_member(uid)
-                if member:
-                    return member
-
-    # 5. fallback chính mình
     return get_user_obj(ctx)
-# ===== HELPER =====
-def get_user_obj(ctx):
-    return getattr(ctx, "user", None) or getattr(ctx, "author", None)
 
 
-async def send_like(ctx, content=None, embed=None, view=None, ephemeral=False):
-    kwargs = {}
+async def send_like(ctx, content=None, embed=None, ephemeral=False):
+    if hasattr(ctx, "response"):
+        if not ctx.response.is_done():
+            return await ctx.response.send_message(content=content, embed=embed, ephemeral=ephemeral)
+        return await ctx.followup.send(content=content, embed=embed, ephemeral=ephemeral)
 
-    if content is not None:
-        kwargs["content"] = content
-    if embed is not None:
-        kwargs["embed"] = embed
-    if view is not None:  # 🔥 FIX: không truyền None
-        kwargs["view"] = view
+    return await ctx.send(content=content, embed=embed)
 
-    # ===== SLASH COMMAND =====
-    if hasattr(ctx, "response") and hasattr(ctx.response, "send_message"):
-        is_done = False
 
-        # 🔥 FIX: tránh crash PrefixResponse
-        if hasattr(ctx.response, "is_done"):
-            try:
-                is_done = ctx.response.is_done()
-            except Exception:
-                is_done = False
-
-        if not is_done:
-            return await ctx.response.send_message(
-                **kwargs,
-                ephemeral=ephemeral
-            )
-
-        return await ctx.followup.send(
-            **kwargs,
-            ephemeral=ephemeral
-        )
-
-    # ===== PREFIX COMMAND =====
-    if hasattr(ctx, "channel") and ctx.channel:
-        return await ctx.channel.send(**kwargs)
-
-    return None
-# ===== TEAM CORE =====
 def normalize_team_ids(inv, uid, team_data):
     uid = str(uid)
 
     user = inv.get(uid, {})
     waifus = user.get("waifus", {})
-
-    if isinstance(waifus, list):
-        waifus = {str(w): 0 for w in waifus}
 
     source = team_data.get(uid, {}).get("team", [])
 
@@ -164,7 +81,7 @@ def normalize_team_ids(inv, uid, team_data):
         if wid in seen:
             continue
 
-        if isinstance(waifus, dict) and wid in waifus:
+        if wid in waifus:
             out.append(wid)
             seen.add(wid)
 
@@ -174,32 +91,14 @@ def normalize_team_ids(inv, uid, team_data):
     return out
 
 
-def _as_waifu_dict(inv: dict, uid: str) -> dict:
-    uid = str(uid)
-    user = inv.setdefault(uid, {})
-    waifus = user.setdefault("waifus", {})
-
-    if isinstance(waifus, list):
-        waifus = {str(w): 0 for w in waifus}
-        user["waifus"] = waifus
-
-    if not isinstance(waifus, dict):
-        waifus = {}
-        user["waifus"] = waifus
-
-    return waifus
-
-
 def _waifu_name(waifu_data: dict, wid: str):
     meta = waifu_data.get(wid, {})
     return meta.get("name") or meta.get("display_name") or wid
 
 
-# ===== ANTI-SPAM =====
 def _can_set(uid):
     now = asyncio.get_event_loop().time()
 
-    # cleanup nhẹ để tránh dict phình theo thời gian
     if len(_LAST_SET) > 5000:
         _LAST_SET.clear()
 
@@ -213,17 +112,17 @@ def _can_set(uid):
 
 # ===== LOGIC =====
 async def show_team_logic(ctx, target: Optional[discord.Member] = None):
-    inv = load_json(INV_FILE)
-    team_data = load_json(TEAM_FILE)
-    waifu_data = load_json(WAIFU_FILE)
-
     user = await resolve_target_user(ctx, target)
-
     if not user:
         return await send_like(ctx, content="❌ Không xác định user", ephemeral=True)
 
     uid = str(user.id)
-    team = normalize_team_ids(inv, uid, team_data)
+
+    inv = await get(f"/inventory/{uid}")
+    team_data = await get("/team")
+    waifu_data = await get("/waifu")
+
+    team = normalize_team_ids({uid: inv}, uid, team_data)
 
     if not team:
         return await send_like(ctx, content="Không có waifu.", ephemeral=True)
@@ -235,12 +134,13 @@ async def show_team_logic(ctx, target: Optional[discord.Member] = None):
         lines.append(f"• **{_waifu_name(waifu_data, wid)}** (`{wid}`) | rank: `{rank}`")
 
     embed = discord.Embed(
-        title=f"Team của {getattr(user, 'display_name', getattr(user, 'name', uid))}",
+        title=f"Team của {getattr(user, 'display_name', user.name)}",
         description="\n".join(lines),
         color=discord.Color.blurple(),
     )
 
     return await send_like(ctx, embed=embed)
+
 
 async def set_team_logic(ctx, waifu_ids: str):
     user = get_user_obj(ctx)
@@ -254,37 +154,25 @@ async def set_team_logic(ctx, waifu_ids: str):
 
     async with INV_LOCK:
         async with TEAM_LOCK:
-            inv = load_json(INV_FILE)
-            team_data = load_json(TEAM_FILE)
-            waifu_data = load_json(WAIFU_FILE)
+            inv = await get(f"/inventory/{uid}")
+            team_data = await get("/team")
+            waifu_data = await get("/waifu")
 
-            waifus = _as_waifu_dict(inv, uid)
+            waifus = inv.get("waifus", {})
 
-            raw_ids = [
-                str(x.strip())
-                for x in waifu_ids.replace(",", " ").replace("\n", " ").split()
-                if x.strip()
-            ]
-
-            if not raw_ids:
-                return await send_like(ctx, content="❌ Chưa nhập waifu", ephemeral=True)
+            raw_ids = [x.strip() for x in waifu_ids.replace(",", " ").split() if x.strip()]
 
             chosen = []
-            seen = set()
             invalid = []
 
             for raw in raw_ids:
                 wid = resolve_waifu_id(raw, waifu_data, waifus)
-
                 if not wid:
                     invalid.append(raw)
                     continue
 
-                if wid in seen:
-                    continue
-
-                chosen.append(wid)
-                seen.add(wid)
+                if wid not in chosen:
+                    chosen.append(wid)
 
                 if len(chosen) >= 3:
                     break
@@ -293,92 +181,73 @@ async def set_team_logic(ctx, waifu_ids: str):
                 return await send_like(ctx, content="❌ Không có waifu hợp lệ", ephemeral=True)
 
             team_data[uid] = {"team": chosen}
-            save_json(TEAM_FILE, team_data)
+            await post("/team/update", json={"data": team_data})
 
-    msg = f"✅ Team: {', '.join(chosen)}"
+    return await send_like(ctx, content=f"✅ Team: {', '.join(chosen)}", ephemeral=True)
 
-    if invalid:
-        msg += f"\n⚠️ Không hợp lệ: {', '.join(invalid[:10])}"
 
-    return await send_like(ctx, content=msg, ephemeral=True)
 async def add_team_logic(ctx, waifu_id: str):
     user = get_user_obj(ctx)
-    if not user:
-        return await send_like(ctx, content="❌ Không xác định user", ephemeral=True)
-
     uid = str(user.id)
-
-    if not _can_set(uid):
-        return await send_like(ctx, content="⏳ Thao tác quá nhanh", ephemeral=True)
 
     async with INV_LOCK:
         async with TEAM_LOCK:
-            inv = load_json(INV_FILE)
-            team_data = load_json(TEAM_FILE)
+            inv = await get(f"/inventory/{uid}")
+            team_data = await get("/team")
 
-            waifus = _as_waifu_dict(inv, uid)
+            waifus = inv.get("waifus", {})
 
-            wid = str(waifu_id).strip()
-
-            if wid not in waifus:
-                return await send_like(ctx, content="❌ Bạn không sở hữu waifu này", ephemeral=True)
+            if waifu_id not in waifus:
+                return await send_like(ctx, content="❌ Không sở hữu", ephemeral=True)
 
             current = team_data.get(uid, {}).get("team", [])
-
-            if wid in current:
-                return await send_like(ctx, content="⚠️ Waifu đã có trong team", ephemeral=True)
 
             if len(current) >= 3:
-                return await send_like(ctx, content="❌ Team đã đủ 3 waifu", ephemeral=True)
+                return await send_like(ctx, content="❌ Full team", ephemeral=True)
 
-            current.append(wid)
+            if waifu_id not in current:
+                current.append(waifu_id)
+
             team_data[uid] = {"team": current}
+            await post("/team/update", json={"data": team_data})
 
-            save_json(TEAM_FILE, team_data)
+    return await send_like(ctx, content="✅ Đã thêm", ephemeral=True)
 
-    return await send_like(ctx, content=f"✅ Đã thêm {wid} vào team", ephemeral=True)
+
 async def remove_team_logic(ctx, waifu_id: str):
     user = get_user_obj(ctx)
-    if not user:
-        return await send_like(ctx, content="❌ Không xác định user", ephemeral=True)
-
     uid = str(user.id)
 
     async with INV_LOCK:
         async with TEAM_LOCK:
-            team_data = load_json(TEAM_FILE)
+            team_data = await get("/team")
 
             current = team_data.get(uid, {}).get("team", [])
 
-            wid = str(waifu_id).strip()
+            if waifu_id not in current:
+                return await send_like(ctx, content="❌ Không có trong team", ephemeral=True)
 
-            if wid not in current:
-                return await send_like(ctx, content="❌ Waifu không có trong team", ephemeral=True)
-
-            current.remove(wid)
+            current.remove(waifu_id)
 
             if current:
                 team_data[uid] = {"team": current}
             else:
                 team_data.pop(uid, None)
 
-            save_json(TEAM_FILE, team_data)
+            await post("/team/update", json={"data": team_data})
 
-    return await send_like(ctx, content=f"✅ Đã xoá {wid} khỏi team", ephemeral=True)
+    return await send_like(ctx, content="✅ Đã xoá", ephemeral=True)
+
+
 async def clear_team_logic(ctx):
     user = get_user_obj(ctx)
-    if not user:
-        return await send_like(ctx, content="❌ Không xác định user", ephemeral=True)
-
     uid = str(user.id)
 
-    # QUY TẮC CHUNG TOÀN PROJECT:
-    # INV_LOCK -> TEAM_LOCK
     async with INV_LOCK:
         async with TEAM_LOCK:
-            team_data = load_json(TEAM_FILE)
+            team_data = await get("/team")
             team_data.pop(uid, None)
-            save_json(TEAM_FILE, team_data)
+            await post("/team/update", json={"data": team_data})
 
     return await send_like(ctx, content="✅ Đã xoá team", ephemeral=True)
 
@@ -391,21 +260,12 @@ async def team_logic(ctx, action: str = None, args: str = None, target: Optional
         return await set_team_logic(ctx, args or "")
 
     if action == "add":
-        if not args:
-            return await send_like(ctx, content="❌ Cú pháp: team add <waifu_id>", ephemeral=True)
         return await add_team_logic(ctx, args)
 
-    if action in ("remove", "rm", "del"):
-        if not args:
-            return await send_like(ctx, content="❌ Cú pháp: team remove <waifu_id>", ephemeral=True)
+    if action in ("remove", "rm"):
         return await remove_team_logic(ctx, args)
 
     if action == "clear":
         return await clear_team_logic(ctx)
 
     return await send_like(ctx, content="❌ Lệnh không hợp lệ")
-async def setup(bot):
-    return None
-
-
-print("Loaded team has success")

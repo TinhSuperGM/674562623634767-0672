@@ -1,21 +1,21 @@
-import discord
-import json
-import os
+from __future__ import annotations
+
 import asyncio
+import inspect
 import random
-import copy
 from datetime import datetime, timedelta
-from typing import Dict, Any, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, Union
 
-from Data import data_user
-from Data.level import sync_all
+import discord
 
-# ===== PATH =====
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-USER_FILE = os.path.join(BASE_DIR, "Data", "user.json")
-INV_FILE = os.path.join(BASE_DIR, "Data", "inventory.json")
-WAIFU_FILE = os.path.join(BASE_DIR, "Data", "waifu_data.json")
-LEVEL_FILE = os.path.join(BASE_DIR, "Data", "level.json")
+from api_client import get as api_get
+from api_client import post as api_post
+
+try:
+    from Data.level import sync_all  # nếu bạn đã đổi module này sang API thì vẫn dùng được
+except Exception:
+    async def sync_all():
+        return None
 
 # ===== CONFIG =====
 WORK_COOLDOWN = timedelta(hours=18)
@@ -78,14 +78,17 @@ WORK_ORDER = ["mine", "cave", "road", "company"]
 # ===== LOCKS =====
 locks: Dict[str, asyncio.Lock] = {}
 
+
 def get_lock(uid: str) -> asyncio.Lock:
     if uid not in locks:
         locks[uid] = asyncio.Lock()
     return locks[uid]
 
+
 # ===== BOT / LOOP =====
 BOT = None
 WORK_TASK: Optional[asyncio.Task] = None
+
 
 def init_work(bot):
     global BOT, WORK_TASK
@@ -93,45 +96,64 @@ def init_work(bot):
     if WORK_TASK is None or WORK_TASK.done():
         WORK_TASK = bot.loop.create_task(work_loop())
 
-# ===== JSON =====
-def load_json(path, default):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
 
-    if not os.path.exists(path):
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(default, f, ensure_ascii=False, indent=4)
+# ===== API HELPERS =====
+async def _maybe_await(value):
+    if inspect.isawaitable(value):
+        return await value
+    return value
 
-    try:
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
-        if isinstance(data, type(default)):
+
+async def _api_get_first(paths: list[str]):
+    for path in paths:
+        data = await api_get(path)
+        if data is not None:
             return data
-    except Exception:
-        pass
+    return None
 
-    if isinstance(default, dict):
-        return default.copy()
-    if isinstance(default, list):
-        return list(default)
-    return default
 
-def save_json(path, data):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=4)
-    os.replace(tmp, path)
+async def _load_user(uid: str) -> Dict[str, Any]:
+    data = await api_get(f"/users/{uid}")
+    return data if isinstance(data, dict) else {}
 
-def _reload_cache():
-    try:
-        data_user.reload_cache()
-    except Exception:
-        pass
 
-def _credit_gold(users: Dict[str, Any], uid: str, amount: int):
-    user = _get_user(users, uid)
-    user["gold"] = max(0, _safe_int(user.get("gold"), 0) + _safe_int(amount, 0))
-    data_user.save_user(uid, user)
+async def _patch_user(uid: str, patch: Dict[str, Any]) -> bool:
+    res = await api_post(f"/users/{uid}/update", {"data": patch})
+    return bool(res and res.get("success"))
+
+
+async def _add_gold(uid: str, amount: int) -> bool:
+    res = await api_post(f"/users/{uid}/gold/add", {"amount": int(amount)})
+    return bool(res and res.get("success"))
+
+
+async def _load_inventory(uid: str) -> Dict[str, Any]:
+    data = await api_get(f"/inventory/{uid}")
+    return data if isinstance(data, dict) else {}
+
+
+async def _patch_inventory(uid: str, patch: Dict[str, Any]) -> bool:
+    res = await api_post(f"/inventory/{uid}/update", {"data": patch})
+    return bool(res and res.get("success"))
+
+
+async def _load_waifu_data() -> Dict[str, Any]:
+    data = await api_get("/waifu")
+    return data if isinstance(data, dict) else {}
+
+
+async def _load_level(uid: str) -> Dict[str, Any]:
+    data = await _api_get_first([f"/level/{uid}", f"/levels/{uid}"])
+    return data if isinstance(data, dict) else {}
+
+
+async def _patch_level(uid: str, patch: Dict[str, Any]) -> bool:
+    res = await api_post(f"/level/{uid}/update", {"data": patch})
+    if res and res.get("success"):
+        return True
+    res = await api_post(f"/levels/{uid}/update", {"data": patch})
+    return bool(res and res.get("success"))
+
 
 # ===== SAFE HELPERS =====
 def _safe_int(value, default=1):
@@ -140,14 +162,15 @@ def _safe_int(value, default=1):
     except Exception:
         return default
 
+
 def _parse_dt(value: Optional[str]) -> Optional[datetime]:
     if not value:
         return None
     try:
-        return datetime.fromisoformat(value)
-    except Exception as e:
-        print(f"[work._reply] {e}")
+        return datetime.fromisoformat(str(value))
+    except Exception:
         return None
+
 
 def _format_remaining(delta: timedelta) -> str:
     total = max(0, int(delta.total_seconds()))
@@ -155,8 +178,10 @@ def _format_remaining(delta: timedelta) -> str:
     m = (total % 3600) // 60
     return f"{h} giờ {m} phút"
 
+
 def _ts(dt: Optional[datetime]) -> int:
     return int(dt.timestamp()) if dt else int(datetime.now().timestamp())
+
 
 def _get_user(users: Dict[str, Any], uid: str) -> Dict[str, Any]:
     user = users.setdefault(uid, {})
@@ -165,12 +190,6 @@ def _get_user(users: Dict[str, Any], uid: str) -> Dict[str, Any]:
         user = users[uid]
     return user
 
-def _get_love_store(user_data: Dict[str, Any]) -> Dict[str, Any]:
-    store = user_data.get("waifu_loves")
-    if not isinstance(store, dict):
-        store = {}
-        user_data["waifu_loves"] = store
-    return store
 
 def _waifu_exists(waifus, default_id: str) -> bool:
     if isinstance(waifus, dict):
@@ -184,6 +203,7 @@ def _waifu_exists(waifus, default_id: str) -> bool:
                 return True
     return False
 
+
 def _get_rank(default_id: str, waifu_data: Dict[str, Any]) -> Optional[str]:
     info = waifu_data.get(default_id)
     if not isinstance(info, dict):
@@ -191,22 +211,19 @@ def _get_rank(default_id: str, waifu_data: Dict[str, Any]) -> Optional[str]:
     rank = str(info.get("rank", "")).strip().lower()
     return rank or None
 
+
 def _get_level(levels: Dict[str, Any], uid: str, default_id: str) -> int:
     return max(1, _safe_int(levels.get(uid, {}).get(default_id, 1), 1))
 
-def _get_love(users: Dict[str, Any], inv: Dict[str, Any], uid: str, default_id: str) -> int:
+
+def _get_love(inv: Dict[str, Any], uid: str, default_id: str) -> int:
     inv_store = inv.get(uid, {}).get("waifus")
     if isinstance(inv_store, dict) and default_id in inv_store:
         return max(1, _safe_int(inv_store.get(default_id, 1), 1))
-
-    user_data = _get_user(users, uid)
-    user_store = _get_love_store(user_data)
-    if default_id in user_store:
-        return max(1, _safe_int(user_store.get(default_id, 1), 1))
-
     return 100
 
-def _set_love(users: Dict[str, Any], inv: Dict[str, Any], uid: str, default_id: str, new_love: int):
+
+def _set_love(inv: Dict[str, Any], uid: str, default_id: str, new_love: int):
     love_val = max(1, _safe_int(new_love, 1))
 
     if uid not in inv or not isinstance(inv.get(uid), dict):
@@ -215,34 +232,38 @@ def _set_love(users: Dict[str, Any], inv: Dict[str, Any], uid: str, default_id: 
         inv[uid]["waifus"] = {}
     inv[uid]["waifus"][default_id] = love_val
 
-    user_data = _get_user(users, uid)
-    user_store = _get_love_store(user_data)
-    user_store[default_id] = love_val
 
 def _get_rank_base(rank_str: str) -> int:
     return RANK_BASE.get(rank_str, 1)
 
+
 def _work_base_gold(rank_base: int, love_point: int, level: int) -> int:
     return max(1, (rank_base * love_point // max(level, 1)) + 1 + (level // 10))
+
 
 def _clamp_gold(value: int) -> int:
     return max(MIN_GOLD, min(int(value), MAX_GOLD))
 
+
 def _cooldown_end(user_data: Dict[str, Any]) -> Optional[datetime]:
     return _parse_dt(user_data.get("last_work"))
+
 
 def _is_job_active(job: Dict[str, Any]) -> bool:
     return isinstance(job, dict) and bool(job.get("active")) and bool(job.get("area"))
 
+
 def _job_ready(job: Dict[str, Any]) -> bool:
     claim_at = _parse_dt(job.get("claim_at"))
     return claim_at is not None and datetime.now() >= claim_at
+
 
 def _remaining_to_claim(job: Dict[str, Any]) -> Optional[timedelta]:
     claim_at = _parse_dt(job.get("claim_at"))
     if not claim_at:
         return None
     return max(timedelta(0), claim_at - datetime.now())
+
 
 # ===== EMBEDS =====
 def build_area_select_embed(display_name: str, mention: str, default_id: str, rank_str: str, level: int, love_point: int):
@@ -273,6 +294,7 @@ def build_area_select_embed(display_name: str, mention: str, default_id: str, ra
             inline=False,
         )
     return embed
+
 
 def build_working_embed(display_name: str, mention: str, job: Dict[str, Any], remaining: Optional[timedelta]):
     area_cfg = WORK_AREAS.get(job.get("area"), WORK_AREAS["mine"])
@@ -314,6 +336,7 @@ def build_working_embed(display_name: str, mention: str, job: Dict[str, Any], re
         inline=True,
     )
     return embed
+
 
 def build_result_embed(user_id: str, pending: Dict[str, Any]):
     area_cfg = WORK_AREAS.get(pending.get("area"), WORK_AREAS["mine"])
@@ -376,12 +399,14 @@ def build_result_embed(user_id: str, pending: Dict[str, Any]):
     )
     return embed
 
+
 def _make_payload(uid: str, pending: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "channel_id": pending.get("channel_id"),
         "content": f"<@{uid}>",
         "embed": build_result_embed(uid, pending),
     }
+
 
 # ===== SEND HELPERS =====
 async def _send_payload(bot, payload: Dict[str, Any], target=None) -> bool:
@@ -426,6 +451,7 @@ async def _send_payload(bot, payload: Dict[str, Any], target=None) -> bool:
         print(f"[work._send_payload] {e}")
         return False
 
+
 async def _reply(target, content=None, embed=None, view=None, ephemeral=False):
     try:
         if hasattr(target, "response"):
@@ -446,6 +472,7 @@ async def _reply(target, content=None, embed=None, view=None, ephemeral=False):
     except Exception:
         return None
 
+
 # ===== PENDING REWARD =====
 async def _flush_pending_reward_locked(bot, users: Dict[str, Any], uid: str, target=None) -> Optional[Dict[str, Any]]:
     user = users.get(uid)
@@ -456,50 +483,35 @@ async def _flush_pending_reward_locked(bot, users: Dict[str, Any], uid: str, tar
     if not isinstance(pending, dict):
         return None
 
-    # Credit gold once
     if not pending.get("credited", False):
         if not pending.get("failed", False):
             gold = _safe_int(pending.get("gold"), 0)
             if gold > 0:
-                _credit_gold(users, uid, gold)
+                await _add_gold(uid, gold)
             pending["credited"] = True
-            try:
-                save_json(USER_FILE, users)
-                _reload_cache()
-            except Exception:
-                return None
         else:
             pending["credited"] = True
-            try:
-                save_json(USER_FILE, users)
-                _reload_cache()
-            except Exception:
-                return None
+
+        await _patch_user(uid, {"work_reward_pending": pending})
+        users[uid] = await _load_user(uid)
+        user = users[uid]
 
     payload = _make_payload(uid, pending)
 
-    # Send notification once
     if not pending.get("sent", False):
         ok = await _send_payload(bot, payload, target=target)
         if not ok:
             return None
+
         pending["sent"] = True
         user.pop("work_reward_pending", None)
-        try:
-            save_json(USER_FILE, users)
-            _reload_cache()
-        except Exception:
-            return None
+        await _patch_user(uid, {"work_reward_pending": None})
         return payload
 
-    # Already sent, just clear leftover pending
     user.pop("work_reward_pending", None)
-    try:
-        save_json(USER_FILE, users)
-        _reload_cache()
-    except Exception:
-        pass
+    await _patch_user(uid, {"work_reward_pending": None})
     return payload
+
 
 # ===== SETTLE =====
 async def _settle_job_locked(bot, users: Dict[str, Any], inv: Dict[str, Any], waifu_data: Dict[str, Any], uid: str, target=None) -> Optional[Dict[str, Any]]:
@@ -517,11 +529,7 @@ async def _settle_job_locked(bot, users: Dict[str, Any], inv: Dict[str, Any], wa
     area_key = str(job.get("area"))
     area_cfg = WORK_AREAS.get(area_key)
     if not area_cfg:
-        user.pop("work_job", None)
-        try:
-            save_json(USER_FILE, users)
-        except Exception:
-            pass
+        await _patch_user(uid, {"work_job": None})
         return None
 
     default_id = str(job.get("default_id", "unknown"))
@@ -545,44 +553,48 @@ async def _settle_job_locked(bot, users: Dict[str, Any], inv: Dict[str, Any], wa
         gold = _clamp_gold(gold)
         love_loss = max(1, gold // 5000)
         love_after = max(1, love_before - love_loss)
-        _set_love(users, inv, uid, default_id, love_after)
+        _set_love(inv, uid, default_id, love_after)
 
-    user.pop("work_job", None)
-    user["last_work"] = job.get("started_at", datetime.now().isoformat())
-    user["work_reward_pending"] = {
-        "area": area_key,
-        "rank": rank_str,
-        "level": level,
-        "default_id": default_id,
-        "love_before": love_before,
-        "love_after": love_after,
-        "love_loss": love_loss,
-        "base_gold": base_gold,
-        "gold": gold,
-        "bonus_hit": bonus_hit,
-        "failed": failed,
-        "channel_id": job.get("channel_id"),
-        "user_name": job.get("user_name"),
-        "completed_at": datetime.now().isoformat(),
-        "credited": False if not failed else True,
-        "sent": False,
+    # update user and inventory via API
+    user_patch = {
+        "work_job": None,
+        "last_work": job.get("started_at", datetime.now().isoformat()),
+        "work_reward_pending": {
+            "area": area_key,
+            "rank": rank_str,
+            "level": level,
+            "default_id": default_id,
+            "love_before": love_before,
+            "love_after": love_after,
+            "love_loss": love_loss,
+            "base_gold": base_gold,
+            "gold": gold,
+            "bonus_hit": bonus_hit,
+            "failed": failed,
+            "channel_id": job.get("channel_id"),
+            "user_name": job.get("user_name"),
+            "completed_at": datetime.now().isoformat(),
+            "credited": False if not failed else True,
+            "sent": False,
+        },
     }
+    inv_patch = {"waifus": inv.get(uid, {}).get("waifus", {})}
 
-    try:
-        save_json(USER_FILE, users)
-        save_json(INV_FILE, inv)
-        _reload_cache()
-    except Exception:
-        return None
+    await _patch_user(uid, user_patch)
+    await _patch_inventory(uid, inv_patch)
+
+    users[uid] = await _load_user(uid)
+    inv[uid] = await _load_inventory(uid)
 
     return await _flush_pending_reward_locked(bot, users, uid, target=target)
+
 
 # ===== START JOB =====
 async def _start_job_locked(target, users: Dict[str, Any], inv: Dict[str, Any], levels: Dict[str, Any], waifu_data: Dict[str, Any], uid: str, area_key: str):
     user = _get_user(users, uid)
 
     if isinstance(user.get("work_reward_pending"), dict):
-        return False, "⏳ Phần thưởng trước đó هنوز đang được xử lý, hãy thử lại sau vài giây."
+        return False, "⏳ Phần thưởng trước đó vẫn đang được xử lý, hãy thử lại sau vài giây."
 
     active_job = user.get("work_job")
     if _is_job_active(active_job):
@@ -597,7 +609,6 @@ async def _start_job_locked(target, users: Dict[str, Any], inv: Dict[str, Any], 
             )
             return False, embed
 
-        # If job is ready, try to flush immediately
         return True, await _settle_job_locked(BOT, users, inv, waifu_data, uid, target=target)
 
     default_id = inv.get(uid, {}).get("default_waifu")
@@ -613,7 +624,7 @@ async def _start_job_locked(target, users: Dict[str, Any], inv: Dict[str, Any], 
         return False, "❌ Waifu này chưa có dữ liệu trong waifu_data.json."
 
     try:
-        await sync_all()
+        await _maybe_await(sync_all())
     except Exception as e:
         print(f"[work.sync_all] {e}")
 
@@ -631,7 +642,7 @@ async def _start_job_locked(target, users: Dict[str, Any], inv: Dict[str, Any], 
         remain = (last_work + WORK_COOLDOWN) - now
         return False, f"⏳ Hãy chờ **{_format_remaining(remain)}** nữa!"
 
-    love_point = _get_love(users, inv, uid, default_id)
+    love_point = _get_love(inv, uid, default_id)
     love_point = max(1, min(love_point, 1_000_000))
 
     job = {
@@ -647,14 +658,13 @@ async def _start_job_locked(target, users: Dict[str, Any], inv: Dict[str, Any], 
         "user_name": getattr(getattr(target, "user", None), "display_name", None) if hasattr(target, "user") else getattr(target, "display_name", uid),
     }
 
-    user["work_job"] = job
-    user["last_work"] = now.isoformat()
+    user_patch = {
+        "work_job": job,
+        "last_work": now.isoformat(),
+    }
 
-    try:
-        save_json(USER_FILE, users)
-        _reload_cache()
-    except Exception:
-        return False, "❌ Có lỗi khi lưu dữ liệu, vui lòng thử lại."
+    await _patch_user(uid, user_patch)
+    users[uid] = await _load_user(uid)
 
     pending_embed = build_working_embed(
         job["user_name"] or uid,
@@ -663,6 +673,7 @@ async def _start_job_locked(target, users: Dict[str, Any], inv: Dict[str, Any], 
         WORK_DURATION,
     )
     return True, pending_embed
+
 
 # ===== UI =====
 class WorkButton(discord.ui.Button):
@@ -679,6 +690,7 @@ class WorkButton(discord.ui.Button):
 
     async def callback(self, interaction: discord.Interaction):
         await self.view_ref.handle_area(interaction, self.area_key)
+
 
 class WorkView(discord.ui.View):
     def __init__(self, owner_id: str, level: int):
@@ -706,19 +718,19 @@ class WorkView(discord.ui.View):
     async def handle_area(self, interaction: discord.Interaction, area_key: str):
         lock = get_lock(self.owner_id)
         async with lock:
-            users = load_json(USER_FILE, {})
-            inv = load_json(INV_FILE, {})
-            levels = load_json(LEVEL_FILE, {})
-            waifu_data = load_json(WAIFU_FILE, {})
+            users = {}
+            inv = {}
+            levels = {}
+            waifu_data = {}
 
-            if not isinstance(users, dict):
-                users = {}
-            if not isinstance(inv, dict):
-                inv = {}
-            if not isinstance(levels, dict):
-                levels = {}
-            if not isinstance(waifu_data, dict):
-                waifu_data = {}
+            user_data = await _load_user(self.owner_id)
+            inv_data = await _load_inventory(self.owner_id)
+            level_data = await _load_level(self.owner_id)
+            waifu_data = await _load_waifu_data()
+
+            users[self.owner_id] = user_data
+            inv[self.owner_id] = inv_data
+            levels[self.owner_id] = level_data
 
             ok, result = await _start_job_locked(interaction, users, inv, levels, waifu_data, self.owner_id, area_key)
 
@@ -735,7 +747,6 @@ class WorkView(discord.ui.View):
                     await _reply(interaction, content=str(result), ephemeral=True)
                 return
 
-            # Job started or settled result
             if isinstance(result, discord.Embed):
                 try:
                     await interaction.response.edit_message(embed=result, view=None)
@@ -747,7 +758,6 @@ class WorkView(discord.ui.View):
                 return
 
             if isinstance(result, dict):
-                # settle result payload was produced
                 try:
                     await interaction.response.edit_message(content="💼 Công việc đã hoàn tất.", view=None)
                 except Exception:
@@ -768,44 +778,43 @@ class WorkView(discord.ui.View):
         except Exception:
             pass
 
+
 # ===== LOOP =====
 async def work_loop():
     await BOT.wait_until_ready()
 
     while not BOT.is_closed():
         try:
-            users = load_json(USER_FILE, {})
-            if isinstance(users, dict):
-                for uid in list(users.keys()):
+            # chỉ kiểm tra danh sách user hiện tại
+            users_all = await api_get("/users")
+            if isinstance(users_all, dict):
+                for uid in list(users_all.keys()):
                     lock = get_lock(str(uid))
                     if lock.locked():
                         continue
 
                     async with lock:
-                        fresh_users = load_json(USER_FILE, {})
-                        fresh_inv = load_json(INV_FILE, {})
-                        fresh_waifu = load_json(WAIFU_FILE, {})
-                        fresh_levels = load_json(LEVEL_FILE, {})
-
-                        if not all(isinstance(x, dict) for x in [fresh_users, fresh_inv, fresh_waifu, fresh_levels]):
+                        fresh_user = await _load_user(str(uid))
+                        if not isinstance(fresh_user, dict):
                             continue
 
-                        user = fresh_users.get(str(uid))
-                        if not isinstance(user, dict):
+                        if isinstance(fresh_user.get("work_reward_pending"), dict):
+                            users = {str(uid): fresh_user}
+                            await _flush_pending_reward_locked(BOT, users, str(uid))
                             continue
 
-                        # First, try to finish pending reward if any
-                        if isinstance(user.get("work_reward_pending"), dict):
-                            await _flush_pending_reward_locked(BOT, fresh_users, str(uid))
-                            continue
-
-                        job = user.get("work_job")
+                        job = fresh_user.get("work_job")
                         if _is_job_active(job) and _job_ready(job):
-                            await _settle_job_locked(BOT, fresh_users, fresh_inv, fresh_waifu, str(uid))
+                            fresh_inv = await _load_inventory(str(uid))
+                            fresh_waifu = await _load_waifu_data()
+                            users = {str(uid): fresh_user}
+                            inv = {str(uid): fresh_inv}
+                            await _settle_job_locked(BOT, users, inv, fresh_waifu, str(uid))
         except Exception:
             pass
 
         await asyncio.sleep(CHECK_INTERVAL)
+
 
 # ===== COMMAND =====
 async def work(ctx_or_interaction):
@@ -822,24 +831,25 @@ async def work(ctx_or_interaction):
 
     lock = get_lock(uid)
     async with lock:
-        users = load_json(USER_FILE, {})
-        inv = load_json(INV_FILE, {})
-        levels = load_json(LEVEL_FILE, {})
-        waifu_data = load_json(WAIFU_FILE, {})
+        user_data = await _load_user(uid)
+        inv_data = await _load_inventory(uid)
+        level_data = await _load_level(uid)
+        waifu_data = await _load_waifu_data()
 
-        if not all(isinstance(x, dict) for x in [users, inv, levels, waifu_data]):
+        users = {uid: user_data}
+        inv = {uid: inv_data}
+        levels = {uid: level_data}
+
+        if not all(isinstance(x, dict) for x in [user_data, inv_data, level_data, waifu_data]):
             return await _reply(ctx_or_interaction, content="❌ Lỗi dữ liệu, vui lòng thử lại.", ephemeral=True)
 
-        user = _get_user(users, uid)
-
-        # pending reward has priority
-        if isinstance(user.get("work_reward_pending"), dict):
+        if isinstance(user_data.get("work_reward_pending"), dict):
             payload = await _flush_pending_reward_locked(BOT, users, uid, target=ctx_or_interaction)
             if payload:
                 return None
             return await _reply(ctx_or_interaction, content="⏳ Đang xử lý phần thưởng cũ, thử lại sau vài giây.", ephemeral=True)
 
-        active_job = user.get("work_job")
+        active_job = user_data.get("work_job")
         if _is_job_active(active_job):
             if _job_ready(active_job):
                 payload = await _settle_job_locked(BOT, users, inv, waifu_data, uid, target=ctx_or_interaction)
@@ -851,18 +861,16 @@ async def work(ctx_or_interaction):
             embed = build_working_embed(display_name, mention, active_job, remain)
             return await _reply(ctx_or_interaction, embed=embed, ephemeral=False)
 
-        # cooldown
-        last_work = _cooldown_end(user)
+        last_work = _cooldown_end(user_data)
         if last_work and datetime.now() < last_work + WORK_COOLDOWN:
             remain = (last_work + WORK_COOLDOWN) - datetime.now()
             return await _reply(ctx_or_interaction, content=f"⏳ Hãy chờ **{_format_remaining(remain)}** nữa!", ephemeral=True)
 
-        # prerequisites
-        default_id = inv.get(uid, {}).get("default_waifu")
+        default_id = inv_data.get("default_waifu")
         if not default_id:
             return await _reply(ctx_or_interaction, content="❌ Bạn chưa có waifu nào để đi làm!", ephemeral=True)
 
-        waifus = inv.get(uid, {}).get("waifus")
+        waifus = inv_data.get("waifus")
         if not _waifu_exists(waifus, default_id):
             return await _reply(ctx_or_interaction, content="❌ Waifu mặc định không hợp lệ!", ephemeral=True)
 
@@ -871,12 +879,12 @@ async def work(ctx_or_interaction):
             return await _reply(ctx_or_interaction, content="❌ Waifu này chưa có dữ liệu trong waifu_data.json.", ephemeral=True)
 
         try:
-            await sync_all()
+            await _maybe_await(sync_all())
         except Exception as e:
             print(f"[work.sync_all] {e}")
 
         level = _get_level(levels, uid, default_id)
-        love_point = _get_love(users, inv, uid, default_id)
+        love_point = _get_love(inv, uid, default_id)
 
         view = WorkView(uid, level)
         embed = build_area_select_embed(display_name, mention, default_id, rank_str, level, love_point)

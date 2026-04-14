@@ -1,7 +1,7 @@
 async def huy_dau_gia_logic(interaction, auction_id: str):
     await interaction.response.defer(ephemeral=True)
 
-    auctions = load_auctions()
+    auctions = await get_auctions()
     auction = auctions.get(auction_id)
 
     if not auction:
@@ -15,11 +15,11 @@ async def huy_dau_gia_logic(interaction, auction_id: str):
     if not is_admin and uid != seller:
         return await interaction.followup.send("❌ Không có quyền hủy!")
 
-    # 🔒 LOCK THEO AUCTION (FIX RACE CONDITION)
+    # 🔒 LOCK THEO AUCTION
     async with dau_gia.get_auction_lock(auction_id):
 
-        # reload để tránh data stale
-        auctions = load_auctions()
+        # reload tránh stale
+        auctions = await get_auctions()
         auction = auctions.get(auction_id)
 
         if not auction:
@@ -30,28 +30,27 @@ async def huy_dau_gia_logic(interaction, auction_id: str):
 
         # ===== TRẢ WAIFU =====
         async with dau_gia.GLOBAL_LOCK:
-            inv = dau_gia.load_json(dau_gia.INV_FILE)
+            inv = await get_inventory(seller)
 
-            inv.setdefault(seller, {"waifus": {}, "bag": {}})
-            inv[seller].setdefault("waifus", {})
-            inv[seller].setdefault("bag", {})
+            inv.setdefault("waifus", {})
+            inv.setdefault("bag", {})
 
-            inv[seller]["waifus"][waifu_id] = love
+            inv["waifus"][waifu_id] = love
 
-            dau_gia.save_json(dau_gia.INV_FILE, inv)
+            await update_inventory(seller, inv)
 
-        # ===== HOÀN GOLD (FIX AWAIT + NULL CHECK) =====
+        # ===== HOÀN GOLD =====
         highest = auction.get("highest_bidder")
         current = int(auction.get("current_bid", 0))
 
         if highest and current > 0:
             try:
-                await data_user.add_gold(highest, current)
+                await add_gold(highest, current)
             except Exception as e:
                 print("[REFUND ERROR]", e)
 
-        # ===== XÓA MESSAGE (MULTI SERVER SAFE) =====
-        channels = dau_gia.get_channels()
+        # ===== XÓA MESSAGE =====
+        channels = await get_auction_channels()
 
         for gid, ch_data in channels.items():
 
@@ -72,6 +71,6 @@ async def huy_dau_gia_logic(interaction, auction_id: str):
         auctions.pop(auction_id, None)
         dau_gia.auction_locks.pop(auction_id, None)
 
-        save_auctions(auctions)
+        await update_auctions(auctions)
 
     await interaction.followup.send("✅ Đã hủy đấu giá thành công!")

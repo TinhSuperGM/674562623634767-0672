@@ -1,20 +1,14 @@
+from __future__ import annotations
+
 import asyncio
 import discord
-import json
-import os
 import time
 import uuid
 from typing import Any, Dict, Optional, Union
 
 from discord.ext import commands
 from Data import data_user
-
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-WAIFU_FILE = os.path.join(BASE_DIR, "Data", "waifu_data.json")
-INV_FILE = os.path.join(BASE_DIR, "Data", "inventory.json")
-AUCTION_FILE = os.path.join(BASE_DIR, "Data", "auction.json")
-CHANNEL_FILE = os.path.join(BASE_DIR, "Data", "auction_channels.json")
+from api_client import get as api_get, post as api_post
 
 ALLOWED_AUCTION_RANKS = {"truyen_thuyet", "toi_thuong", "limited"}
 
@@ -42,57 +36,14 @@ def check_cooldown(uid: str, aid: str):
     return True
 
 
-# ===== FILE =====
-def load_json(path):
-    if not os.path.exists(path):
-        return {}
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
-
-
-def save_json(path, data):
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=4, ensure_ascii=False)
-    os.replace(tmp, path)
-
-
 # ===== CACHE =====
 WAIFU_CACHE: Dict[str, Any] = {}
 WAIFU_LAST = 0.0
-
-
-def get_waifu_data():
-    global WAIFU_CACHE, WAIFU_LAST
-    if time.time() - WAIFU_LAST < 10:
-        return WAIFU_CACHE
-    WAIFU_CACHE = load_json(WAIFU_FILE)
-    WAIFU_LAST = time.time()
-    return WAIFU_CACHE
-
 
 CHANNEL_CACHE: Dict[str, Any] = {}
 CHANNEL_LAST = 0.0
 
 
-def get_channels():
-    global CHANNEL_CACHE, CHANNEL_LAST
-    if time.time() - CHANNEL_LAST < 10:
-        return CHANNEL_CACHE
-    CHANNEL_CACHE = load_json(CHANNEL_FILE)
-    CHANNEL_LAST = time.time()
-    return CHANNEL_CACHE
-
-
-# ===== UPDATE CONTROL =====
-LAST_UPDATE: Dict[tuple, float] = {}
-
-
-# ===== CTX HELPERS =====
 def _get_user(ctx):
     return ctx.user if isinstance(ctx, discord.Interaction) else ctx.author
 
@@ -101,6 +52,63 @@ def _get_client(ctx):
     return ctx.client if isinstance(ctx, discord.Interaction) else ctx.bot
 
 
+def _normalize_inventory(inv: Any) -> Dict[str, Any]:
+    if not isinstance(inv, dict):
+        inv = {}
+    inv.setdefault("waifus", {})
+    inv.setdefault("bag", {})
+    inv.setdefault("bag_item", {})
+    inv.setdefault("default_waifu", None)
+    return inv
+
+
+def _normalize_auction(a: Any) -> Dict[str, Any]:
+    return a if isinstance(a, dict) else {}
+
+
+async def get_waifu_data():
+    global WAIFU_CACHE, WAIFU_LAST
+    if time.time() - WAIFU_LAST < 10 and WAIFU_CACHE:
+        return WAIFU_CACHE
+
+    data = await api_get("/waifu")
+    WAIFU_CACHE = data if isinstance(data, dict) else {}
+    WAIFU_LAST = time.time()
+    return WAIFU_CACHE
+
+
+async def get_channels():
+    global CHANNEL_CACHE, CHANNEL_LAST
+    if time.time() - CHANNEL_LAST < 10 and CHANNEL_CACHE:
+        return CHANNEL_CACHE
+
+    data = await api_get("/auction-channels")
+    CHANNEL_CACHE = data if isinstance(data, dict) else {}
+    CHANNEL_LAST = time.time()
+    return CHANNEL_CACHE
+
+
+async def load_auctions():
+    data = await api_get("/auction")
+    return data if isinstance(data, dict) else {}
+
+
+async def save_auctions(data: Dict[str, Any]) -> bool:
+    res = await api_post("/auction/bulk_replace", {"data": data})
+    return bool(res and res.get("success"))
+
+
+async def get_inventory(user_id: str) -> Dict[str, Any]:
+    data = await api_get(f"/inventory/{user_id}")
+    return _normalize_inventory(data)
+
+
+async def save_inventory(user_id: str, inv: Dict[str, Any]) -> bool:
+    res = await api_post(f"/inventory/{user_id}/update", {"data": inv})
+    return bool(res and res.get("success"))
+
+
+# ===== SEND HELPERS =====
 async def _send(
     ctx: Union[commands.Context, discord.Interaction],
     content: Optional[str] = None,
@@ -160,12 +168,13 @@ def get_color(rank):
     }.get(rank, 0xFFD700)
 
 
-def get_info(a):
-    return get_waifu_data().get(a["waifu_id"], {})
+async def get_info(a):
+    waifu_data = await get_waifu_data()
+    return waifu_data.get(a["waifu_id"], {})
 
 
-def build_active_embed(a):
-    info = get_info(a)
+async def build_active_embed(a):
+    info = await get_info(a)
 
     name = (
         info.get("name")
@@ -200,8 +209,8 @@ def build_active_embed(a):
     return e
 
 
-def build_end_embed(a):
-    info = get_info(a)
+async def build_end_embed(a):
+    info = await get_info(a)
 
     name = (
         info.get("name")
@@ -210,7 +219,7 @@ def build_end_embed(a):
         or a["waifu_id"]
     )
 
-    bio = info.get("bio") or info.get("description") or "Không có mô tả"
+    bio = info.get("Bio") or info.get("bio") or info.get("description") or "Không có mô tả"
 
     winner = a.get("highest_bidder")
     seller = a["seller"]
@@ -254,8 +263,8 @@ class BidModal(discord.ui.Modal, title="Đặt giá"):
             return await interaction.followup.send("❌ Sai số", ephemeral=True)
 
         async with get_auction_lock(self.aid):
-            auctions = load_json(AUCTION_FILE)
-            a = auctions.get(self.aid)
+            auctions = await load_auctions()
+            a = _normalize_auction(auctions.get(self.aid))
 
             if not a:
                 return await interaction.followup.send("❌ Không tồn tại", ephemeral=True)
@@ -285,7 +294,6 @@ class BidModal(discord.ui.Modal, title="Đặt giá"):
                 if prev and prev != uid and prev_bid > 0:
                     await data_user.add_gold(prev, prev_bid)
             except Exception:
-                # rollback current bidder nếu refund thất bại
                 try:
                     await data_user.add_gold(uid, bid)
                 except Exception:
@@ -299,7 +307,7 @@ class BidModal(discord.ui.Modal, title="Đặt giá"):
                 a["end_time"] += 15
 
             auctions[self.aid] = a
-            save_json(AUCTION_FILE, auctions)
+            await save_auctions(auctions)
 
         await update_all_embeds(interaction.client, self.aid, a, False)
         await interaction.followup.send("✅ Đã bid", ephemeral=True)
@@ -331,7 +339,7 @@ async def _ensure_panel_for_guild(bot, aid: str, a: Dict[str, Any], gid: str, ch
         if ch is None:
             return
 
-        embed = build_active_embed(a)
+        embed = await build_active_embed(a)
         view = BidView(aid)
         msg_key = f"message_id_{gid}"
         msg_id = a.get(msg_key)
@@ -351,7 +359,7 @@ async def _ensure_panel_for_guild(bot, aid: str, a: Dict[str, Any], gid: str, ch
 
 
 async def update_all_embeds(bot, aid, a, ended=False):
-    channels = get_channels()
+    channels = await get_channels()
 
     for gid, ch_data in channels.items():
         ch_id = ch_data.get("auction_channel_id") if isinstance(ch_data, dict) else ch_data
@@ -360,21 +368,13 @@ async def update_all_embeds(bot, aid, a, ended=False):
         if not ch_id or not msg_id:
             continue
 
-        now = time.time()
-        key = (aid, gid)
-
-        if not ended:
-            if now - LAST_UPDATE.get(key, 0) < 2:
-                continue
-            LAST_UPDATE[key] = now
-
         try:
             ch = bot.get_channel(int(ch_id)) or await bot.fetch_channel(int(ch_id))
             if ch is None:
                 continue
 
             msg = await ch.fetch_message(int(msg_id))
-            embed = build_end_embed(a) if ended else build_active_embed(a)
+            embed = await build_end_embed(a) if ended else await build_active_embed(a)
             view = None if ended else BidView(aid)
 
             await msg.edit(embed=embed, view=view)
@@ -387,8 +387,8 @@ async def _bootstrap_auctions(bot):
 
     while not bot.is_closed():
         try:
-            auctions = load_json(AUCTION_FILE)
-            channels = get_channels()
+            auctions = await load_auctions()
+            channels = await get_channels()
 
             changed = False
 
@@ -396,10 +396,8 @@ async def _bootstrap_auctions(bot):
                 if not isinstance(a, dict):
                     continue
 
-                # buttons sống lại sau restart
                 bot.add_view(BidView(aid))
 
-                # tự gửi / tự gắn panel vào mọi server đã set channel
                 for gid, ch_data in channels.items():
                     ch_id = ch_data.get("auction_channel_id") if isinstance(ch_data, dict) else ch_data
                     if not ch_id:
@@ -413,7 +411,7 @@ async def _bootstrap_auctions(bot):
                     changed = True
 
             if changed:
-                save_json(AUCTION_FILE, auctions)
+                await save_auctions(auctions)
 
             break
         except Exception:
@@ -426,7 +424,7 @@ async def dau_gia_logic(ctx, waifu_id, min_price, step):
     uid = str(_get_user(ctx).id)
     client = _get_client(ctx)
 
-    waifu_data = get_waifu_data()
+    waifu_data = await get_waifu_data()
     waifu_info = waifu_data.get(waifu_id, {})
 
     rank = str(waifu_info.get("rank", "")).strip().lower()
@@ -434,13 +432,13 @@ async def dau_gia_logic(ctx, waifu_id, min_price, step):
         return await _send(ctx, "❌ Chỉ rank truyen_thuyet / toi_thuong / limited mới được tạo đấu giá", ephemeral=True)
 
     async with GLOBAL_LOCK:
-        inv = load_json(INV_FILE)
+        inv = await get_inventory(uid)
 
-        if waifu_id not in inv.get(uid, {}).get("waifus", {}):
+        if waifu_id not in inv.get("waifus", {}):
             return await _send(ctx, "❌ Không có", ephemeral=True)
 
-        love = inv[uid]["waifus"].pop(waifu_id)
-        save_json(INV_FILE, inv)
+        love = inv["waifus"].pop(waifu_id)
+        await save_inventory(uid, inv)
 
     aid = str(uuid.uuid4())
 
@@ -456,7 +454,7 @@ async def dau_gia_logic(ctx, waifu_id, min_price, step):
         "love": love,
     }
 
-    channels = get_channels()
+    channels = await get_channels()
 
     for gid, ch_data in channels.items():
         ch_id = ch_data.get("auction_channel_id") if isinstance(ch_data, dict) else ch_data
@@ -468,14 +466,14 @@ async def dau_gia_logic(ctx, waifu_id, min_price, step):
             if ch is None:
                 continue
 
-            msg = await ch.send(embed=build_active_embed(a), view=BidView(aid))
+            msg = await ch.send(embed=await build_active_embed(a), view=BidView(aid))
             a[f"message_id_{gid}"] = msg.id
         except Exception:
             continue
 
-    auctions = load_json(AUCTION_FILE)
+    auctions = await load_auctions()
     auctions[aid] = a
-    save_json(AUCTION_FILE, auctions)
+    await save_auctions(auctions)
 
     await _send(ctx, "✅ Tạo đấu giá", ephemeral=True if isinstance(ctx, discord.Interaction) else False)
 
@@ -486,10 +484,14 @@ async def auction_realtime_loop(bot):
 
     while not bot.is_closed():
         try:
-            auctions = load_json(AUCTION_FILE)
-            inv = load_json(INV_FILE)
-
+            auctions = await load_auctions()
             ended = []
+            dirty_inventories: Dict[str, Dict[str, Any]] = {}
+
+            async def get_cached_inventory(user_id: str):
+                if user_id not in dirty_inventories:
+                    dirty_inventories[user_id] = await get_inventory(user_id)
+                return dirty_inventories[user_id]
 
             for aid, a in list(auctions.items()):
                 if not isinstance(a, dict):
@@ -506,47 +508,51 @@ async def auction_realtime_loop(bot):
                     seller = a["seller"]
                     winner = a.get("highest_bidder")
                     bid = a.get("current_bid", 0)
+                    love = a.get("love", 0)
 
                     if winner and winner != seller:
-                        inv.setdefault(winner, {"waifus": {}, "bag": {}})
-                        inv[winner].setdefault("waifus", {})
-                        inv[winner].setdefault("bag", {})
+                        winner_inv = await get_cached_inventory(winner)
+                        winner_inv.setdefault("waifus", {})
+                        winner_inv.setdefault("bag", {})
 
-                        if waifu not in inv[winner]["waifus"]:
-                            inv[winner]["waifus"][waifu] = a["love"]
+                        if waifu not in winner_inv["waifus"]:
+                            winner_inv["waifus"][waifu] = love
                         else:
-                            inv[winner]["bag"][waifu] = inv[winner]["bag"].get(waifu, 0) + 1
+                            winner_inv["bag"][waifu] = winner_inv["bag"].get(waifu, 0) + 1
 
                         await data_user.add_gold(seller, bid)
 
                     else:
-                        inv.setdefault(seller, {"waifus": {}, "bag": {}})
-                        inv[seller].setdefault("waifus", {})
-                        inv[seller].setdefault("bag", {})
+                        seller_inv = await get_cached_inventory(seller)
+                        seller_inv.setdefault("waifus", {})
+                        seller_inv.setdefault("bag", {})
 
-                        if waifu not in inv[seller]["waifus"]:
-                            inv[seller]["waifus"][waifu] = a["love"]
+                        if waifu not in seller_inv["waifus"]:
+                            seller_inv["waifus"][waifu] = love
                         else:
-                            inv[seller]["bag"][waifu] = inv[seller]["bag"].get(waifu, 0) + 1
+                            seller_inv["bag"][waifu] = seller_inv["bag"].get(waifu, 0) + 1
 
                     ended.append(aid)
-
                     await update_all_embeds(bot, aid, a, True)
+
+            for user_id, inv in dirty_inventories.items():
+                await save_inventory(user_id, inv)
 
             for aid in ended:
                 auctions.pop(aid, None)
 
             if ended:
-                save_json(INV_FILE, inv)
-                save_json(AUCTION_FILE, auctions)
+                await save_auctions(auctions)
 
         except Exception as e:
             print("[AUCTION LOOP ERROR]", e)
 
         await asyncio.sleep(5)
+
+
 # ===== SETUP =====
 async def setup(bot):
-    auctions = load_json(AUCTION_FILE)
+    auctions = await load_auctions()
 
     for aid in auctions:
         bot.add_view(BidView(aid))

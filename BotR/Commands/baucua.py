@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 import random
 import time
@@ -5,14 +7,15 @@ from typing import Any, Dict, Union
 
 import discord
 from discord.ext import commands
-from Data import data_user
+
 from Commands.prayer import get_luck
+from Data import data_user
 
 animals = ["nai", "bau", "ga", "ca", "cua", "tom"]
 
 # ===== EMOJI =====
 CUSTOM_EMOJI = {
-    # "ga": "<a:ga:123456>"
+    # "ga": "",
 }
 
 UNICODE_EMOJI = {
@@ -41,7 +44,6 @@ _SPAM_COUNT: Dict[int, int] = {}
 def spam_control(uid):
     now = time.time()
     last = _LAST_PLAY.get(uid, 0)
-
     diff = now - last
 
     if diff < 2:
@@ -50,12 +52,9 @@ def spam_control(uid):
         _SPAM_COUNT[uid] = 0
 
     _LAST_PLAY[uid] = now
-
     spam = _SPAM_COUNT[uid]
-
     delay = min(spam * 0.5, 2)
     scale = max(1 - spam * 0.1, 0.5)
-
     return delay, scale, spam
 
 
@@ -106,10 +105,7 @@ async def send_message(
 
 # ===== EMBED CHỜ =====
 def build_wait_embed(user):
-    embed = discord.Embed(
-        description="<a:gacha:1490382513388912740> <a:gacha:1490382513388912740> <a:gacha:1490382513388912740>",
-        color=0xf1c40f
-    )
+    embed = discord.Embed(description=" ", color=0xF1C40F)
     embed.set_author(name="Bầu Cua", icon_url=None)
     return embed
 
@@ -122,33 +118,31 @@ def build_result_embed(user, result, choice, count, amount, reward, win, gold, s
     result_line = f"Kết quả: {format_result(result)}"
 
     if win:
-        embed.color = 0x2ecc71
+        embed.color = 0x2ECC71
         embed.description = (
             f"{result_line}\n\n"
-            f"🎉 Bạn đã trúng {count} mặt {get_emoji(choice)}\n"
-            f"💰 đã cộng thêm {reward} <a:gold:1492792339436142703>"
+            f"Bạn đã trúng {count} mặt {get_emoji(choice)}\n"
+            f"Đã cộng thêm {reward} gold"
         )
-
         if spam >= 2:
             embed.description += f"\n⚠️ Spam → giảm thưởng x{scale:.2f}"
-
     else:
-        embed.color = 0xe74c3c
+        embed.color = 0xE74C3C
         embed.description = (
             f"{result_line}\n\n"
-            f"💔 Bạn không trúng mặt nào. Đã trừ {amount} <a:gold:1492792339436142703>"
+            f"Bạn không trúng mặt nào.\n"
+            f"Đã trừ {amount} gold"
         )
 
-    embed.set_footer(text=f"Số dư hiện tại: {gold} <a:gold:1492792339436142703>")
+    embed.set_footer(text=f"Số dư hiện tại: {gold}")
     return embed
 
 
 # ===== MAIN =====
 async def baucua_logic(ctx, choice: str, amount: Any):
     await _defer_if_needed(ctx)
-
     user = _get_user(ctx)
-    uid = str(user.id)  # ✅ FIX: API dùng string key
+    uid = str(user.id)
 
     choice = str(choice).strip().lower()
     amount = _safe_int(amount)
@@ -159,18 +153,17 @@ async def baucua_logic(ctx, choice: str, amount: Any):
     if amount <= 0:
         return await send_message(ctx, content="❌ Gold phải > 0")
 
-    # ✅ API version (await)
+    # API version (data_user.py đã chuyển sang API mode)
     if not await data_user.remove_gold(uid, amount):
         return await send_message(ctx, content="❌ Không đủ gold!")
 
     delay, scale, spam = spam_control(user.id)
-
     msg = await send_message(ctx, embed=build_wait_embed(user))
 
     wait_time = random.uniform(1.5, 3) + delay
     await asyncio.sleep(wait_time)
 
-    luck = _safe_int(await get_luck(uid))  # ✅ FIX: await
+    luck = _safe_int(await get_luck(uid))
 
     weights = {a: 1.0 for a in animals}
     weights[choice] *= (1 + max(0, (luck - 1) / 100) * 5)
@@ -181,18 +174,26 @@ async def baucua_logic(ctx, choice: str, amount: Any):
     if count > 0:
         base = int(amount * (count + 0.9))
         reward = int(base * scale)
-        await data_user.add_gold(uid, reward)  # ✅ API
+        await data_user.add_gold(uid, reward)
         win = True
     else:
         reward = 0
         win = False
 
-    # ✅ FIX: get_user phải await
     user_data = await data_user.get_user(uid)
     gold = user_data.get("gold", 0)
 
     embed = build_result_embed(
-        user, result, choice, count, amount, reward, win, gold, spam, scale
+        user,
+        result,
+        choice,
+        count,
+        amount,
+        reward,
+        win,
+        gold,
+        spam,
+        scale,
     )
 
     try:
@@ -201,5 +202,9 @@ async def baucua_logic(ctx, choice: str, amount: Any):
     except Exception:
         pass
 
+    print("Loaded bầu cua (API) has success")
 
-print("Loaded bầu cua (API) has success")
+
+# ===== BACKWARD COMPATIBILITY =====
+async def baucua(ctx, choice: str, amount: Any):
+    return await baucua_logic(ctx, choice, amount)

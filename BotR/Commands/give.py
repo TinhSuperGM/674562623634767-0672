@@ -7,7 +7,7 @@ import discord
 from discord.ui import View, Button
 
 from Data import data_user
-from BotR import api_client
+import api_client
 
 # =========================================================
 # give.py (API mode)

@@ -4,7 +4,7 @@ import random
 import time
 from typing import Any, Dict
 
-from BotR import api_client
+import api_client
 
 MAX_LUCK = 5.0
 DEFAULT_LUCK = 1.0

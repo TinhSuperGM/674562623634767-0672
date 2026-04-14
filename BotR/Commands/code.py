@@ -8,7 +8,7 @@ from typing import Union
 import discord
 from discord.ext import commands
 
-from BotR import api_client
+import api_client
 from Data import data_user
 
 _CODE_LOCK = asyncio.Lock()

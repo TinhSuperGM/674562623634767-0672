@@ -5,7 +5,7 @@ from typing import Any, Dict
 
 import discord
 
-from BotR import api_client
+import api_client
 from Commands import dau_gia
 from Data import data_admin
 

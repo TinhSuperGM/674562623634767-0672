@@ -8,7 +8,7 @@ from typing import Any, Dict, Optional, Union
 import discord
 from discord.ext import commands
 
-from BotR import api_client
+import api_client
 from Data import data_user
 
 ALLOWED_AUCTION_RANKS = {"truyen_thuyet", "toi_thuong", "limited"}

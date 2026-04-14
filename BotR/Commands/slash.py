@@ -7,7 +7,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from BotR import api_client
+import api_client
 from Commands.bag import bag_logic
 from Commands.baucua import baucua_logic
 from Commands.code import code_logic

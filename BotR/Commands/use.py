@@ -17,7 +17,7 @@ except Exception:
     from BotR.Data.level import sync_all  # type: ignore
 
 try:
-    from BotR import api_client
+    import api_client
 except Exception:
     import api_client  # type: ignore
 

@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional, Tuple
 
 import discord
 
-from BotR import api_client
+import api_client
 
 # =========================
 # PRICE

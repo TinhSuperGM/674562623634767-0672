@@ -11,7 +11,7 @@ from discord.ext import commands
 
 from Commands.prayer import get_luck
 from Data import data_user
-from BotR import api_client
+import api_client
 
 COOLDOWN = 64800  # 18 giờ
 RECORD_LOCK = asyncio.Lock()
@@ -192,11 +192,6 @@ def build_daily_reward_embed(
     embed.add_field(
         name="Streak bonus",
         value=f"**+{streak_bonus:,} <a:gold:1492792339436142703>**\nChuỗi: **{streak} ngày**",
-        inline=True,
-    )
-    embed.add_field(
-        name="Luck",
-        value=f"**{luck:.2f}**",
         inline=True,
     )
     embed.add_field(
@@ -517,7 +512,8 @@ async def daily_logic(ctx):
 
         streak += 1
         streak_bonus = min(streak * 20, 500)
-        luck = float(await _get_luck(user_obj.id))
+        user_data = await api_get(f"/users/{user_obj.id}")
+        luck = float(user_data.get("luck", 1.0))
         reward = roll_gold(luck)
         total_reward = reward + streak_bonus
 

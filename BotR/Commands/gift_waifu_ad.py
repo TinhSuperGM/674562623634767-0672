@@ -7,7 +7,7 @@ import discord
 
 from Data.data_admin import ADMINS
 from Data import data_user
-from BotR import api_client
+import api_client
 
 FILE_LOCK = asyncio.Lock()
 

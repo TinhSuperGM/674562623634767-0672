@@ -3,7 +3,7 @@ from __future__ import annotations
 import discord
 from typing import Any, Dict, List, Optional, Union
 
-from BotR import api_client
+import api_client
 
 # =====================
 # CONFIG

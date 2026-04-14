@@ -12,7 +12,7 @@ from discord.ui import Button, Modal, TextInput, View
 
 from Commands.prayer import get_luck
 from Data.level import sync_all
-from BotR import api_client
+import api_client
 
 # =========================================================
 # setup.py (API mode)

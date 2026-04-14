@@ -6,7 +6,7 @@ import discord
 from Commands.fight import INV_LOCK
 import api_client
 
-TEAM_LOCK = :contentReference[oaicite:0]{index=0}= HELPERS =====
+TEAM_LOCK = {}
 def resolve_waifu_id(input_id: str, waifu_data: dict, user_waifus: dict):
     input_id = str(input_id).lower()
 

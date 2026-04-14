@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import discord
 from discord.ext import commands
 
-from BotR import api_client
+import api_client
 from Data import data_user
 
 # =========================================================

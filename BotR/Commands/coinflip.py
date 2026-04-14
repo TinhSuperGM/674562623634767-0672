@@ -1,130 +1,82 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional, Union
+import random
+import time
+from typing import Any, Dict, Union
 
 import discord
 from discord.ext import commands
 
-from Data import data_user
-import api_client
+from api_client import get, post
+from Commands.prayer import get_luck
 
-VN_TZ = timezone(timedelta(hours=7))
+# ===== SIDE =====
+choices = ["ngua", "sap"]
 
-# =========================================================
-# couple.py (API mode)
-# - No direct JSON file access
-# - Uses api_client.get_couple() / api_client.set_couple()
-# - Keeps the original helper names so slash/prefix files
-#   can keep calling this module without heavy refactor.
-# =========================================================
-
-_COUPLE_LOCK = asyncio.Lock()
-_COUPLE_LOOP_STARTED = False
+# ===== EMOJI =====
+CUSTOM_EMOJI = {}
+UNICODE_EMOJI = {
+    "ngua": "<:ngua:1490580499582681088>",
+    "sap": "<:sap:1490580475172098178>",
+}
 
 
-# ===== API LOAD / SAVE =====
-async def load_couple_data() -> Dict[str, Any]:
-    data = await api_client.get_couple()
-    return data if isinstance(data, dict) else {}
+def get_emoji(x):
+    return CUSTOM_EMOJI.get(x) or UNICODE_EMOJI.get(x, "❔")
 
 
-async def save_couple_data(data: Dict[str, Any]) -> bool:
-    if not isinstance(data, dict):
-        data = {}
-    res = await api_client.set_couple(data)
-    return bool(res and res.get("success"))
+def pretty_side(x: str):
+    x = str(x).lower()
+    if x == "ngua":
+        return "Ngửa"
+    if x == "sap":
+        return "Sấp"
+    return x
 
 
-# ===== TIME =====
-def now_vn() -> datetime:
-    return datetime.now(VN_TZ)
-
-
-def iso_now_vn() -> str:
-    return now_vn().isoformat()
-
-
-def parse_iso_dt(value: Any) -> Optional[datetime]:
-    if not value:
-        return None
+def _safe_int(v):
     try:
-        dt = datetime.fromisoformat(str(value))
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=VN_TZ)
-        return dt
+        return int(v)
     except Exception:
-        return None
+        return 0
 
 
-# ===== CORE =====
-def create_couple(data: Dict[str, Any], u1: int, u2: int) -> None:
-    now = now_vn().strftime("%Y-%m-%d")
-    data[str(u1)] = {
-        "partner": str(u2),
-        "since": now,
-        "points": 0,
-        "pending_break": False,
-        "break_time": None,
-        "break_initiator": None,
-    }
-    data[str(u2)] = {
-        "partner": str(u1),
-        "since": now,
-        "points": 0,
-        "pending_break": False,
-        "break_time": None,
-        "break_initiator": None,
-    }
-
-
-def remove_couple(data: Dict[str, Any], u1: Any, u2: Any) -> None:
-    data.pop(str(u1), None)
-    data.pop(str(u2), None)
-
-
-def is_couple(data: Dict[str, Any], u1: Any, u2: Any) -> bool:
-    u1 = str(u1)
-    u2 = str(u2)
-    return (
-        u1 in data
-        and u2 in data
-        and data[u1].get("partner") == u2
-        and data[u2].get("partner") == u1
-    )
-
-
-def check_auto_break(data: Dict[str, Any], u1: str) -> bool:
-    info = data.get(str(u1))
-    if not isinstance(info, dict):
-        return False
-    if not info.get("pending_break"):
-        return False
-
-    bt_time = parse_iso_dt(info.get("break_time"))
-    if not bt_time:
-        return False
-
-    if now_vn() - bt_time >= timedelta(days=7):
-        partner = info.get("partner")
-        if partner:
-            remove_couple(data, u1, partner)
-        else:
-            data.pop(str(u1), None)
-        return True
-    return False
-
-
-# ===== UTILS =====
 def _get_user(ctx):
-    return getattr(ctx, "author", None) or getattr(ctx, "user", None)
+    return ctx.user if isinstance(ctx, discord.Interaction) else ctx.author
 
 
-def _get_channel(ctx):
-    return getattr(ctx, "channel", None)
+# ===== ANTI SPAM =====
+_LAST_PLAY: Dict[int, float] = {}
+_SPAM_COUNT: Dict[int, int] = {}
 
 
+def spam_control(uid):
+    now = time.time()
+    last = _LAST_PLAY.get(uid, 0)
+    diff = now - last
+
+    if diff < 2:
+        _SPAM_COUNT[uid] = _SPAM_COUNT.get(uid, 0) + 1
+    else:
+        _SPAM_COUNT[uid] = 0
+
+    _LAST_PLAY[uid] = now
+    spam = _SPAM_COUNT[uid]
+    delay = min(spam * 0.5, 2)
+    scale = max(1 - spam * 0.1, 0.5)
+    return delay, scale, spam
+
+
+async def _defer_if_needed(ctx, *, ephemeral: bool = False):
+    if isinstance(ctx, discord.Interaction) and not ctx.response.is_done():
+        try:
+            await ctx.response.defer(ephemeral=ephemeral)
+        except Exception:
+            pass
+
+
+# ===== SEND SAFE =====
 async def _send(
     ctx: Union[commands.Context, discord.Interaction],
     content=None,
@@ -133,424 +85,171 @@ async def _send(
 ):
     try:
         if isinstance(ctx, discord.Interaction):
-            if not ctx.response.is_done():
-                await ctx.response.send_message(
+            try:
+                if not ctx.response.is_done():
+                    await ctx.response.send_message(
+                        content=content,
+                        embed=embed,
+                        ephemeral=ephemeral,
+                    )
+                    return await ctx.original_response()
+                return await ctx.followup.send(
                     content=content,
                     embed=embed,
                     ephemeral=ephemeral,
                 )
-                try:
-                    return await ctx.original_response()
-                except Exception:
-                    return None
-            return await ctx.followup.send(
-                content=content,
-                embed=embed,
-                ephemeral=ephemeral,
-            )
+            except discord.InteractionResponded:
+                return await ctx.followup.send(
+                    content=content,
+                    embed=embed,
+                    ephemeral=ephemeral,
+                )
+
         return await ctx.send(content=content, embed=embed)
+
     except Exception as e:
-        print("[COUPLE SEND ERROR]", e)
+        print("[SEND ERROR]", e)
         return None
 
 
-async def safe_send(ctx, content=None, embed=None, ephemeral: bool = False):
-    return await _send(ctx, content=content, embed=embed, ephemeral=ephemeral)
+# ===== API HELPERS =====
+async def remove_gold(user_id: int, amount: int) -> bool:
+    res = await post(f"/users/{user_id}/gold/remove", {"amount": amount})
+    return isinstance(res, dict) and res.get("success", False)
 
 
-def resolve_target_from_ctx(ctx, target: Optional[Any]) -> Optional[Any]:
-    if target is not None:
-        return target
-
-    message = getattr(ctx, "message", None)
-    if message and getattr(message, "mentions", None):
-        return message.mentions[0]
-
-    return None
+async def add_gold(user_id: int, amount: int):
+    await post(f"/users/{user_id}/gold/add", {"amount": amount})
 
 
-# ===== EMBEDS =====
-def build_info_embed(target, info: Dict[str, Any]) -> discord.Embed:
-    partner_id = info.get("partner")
-    embed = discord.Embed(
-        title=f"💞 Couple của {getattr(target, 'display_name', getattr(target, 'name', 'User'))}",
-        color=discord.Color.from_rgb(255, 105, 180),
-    )
-    embed.add_field(name="Partner", value=f"<@{partner_id}>" if partner_id else "Không có", inline=True)
-    embed.add_field(name="Từ ngày", value=str(info.get("since", "?")), inline=True)
-    embed.add_field(name="Điểm", value=str(info.get("points", 0)), inline=True)
-    embed.add_field(name="Chờ chia tay", value=str(bool(info.get("pending_break"))), inline=True)
-    if info.get("break_time"):
-        embed.add_field(name="Break time", value=str(info.get("break_time")), inline=False)
+async def get_gold(user_id: int) -> int:
+    user = await get(f"/users/{user_id}")
+    if isinstance(user, dict):
+        return _safe_int(user.get("gold"))
+    return 0
+
+
+# ===== EMBED CHỜ =====
+def build_wait_embed(user):
+    embed = discord.Embed(description="", color=0xF1C40F)
+    embed.set_author(name="Tung đồng xu")
     return embed
 
 
-def build_gift_embed(user, partner_id: str, item_name: str, points: int) -> discord.Embed:
-    embed = discord.Embed(
-        title="🎁 Tặng quà couple",
-        description=(
-            f"{user.mention} đã tặng **{item_name}** cho <@{partner_id}>.\n"
-            f"Cả hai nhận thêm **{points} điểm** tình cảm."
-        ),
-        color=discord.Color.from_rgb(255, 182, 193),
-    )
-    return embed
+# ===== EMBED KẾT QUẢ =====
+def build_result_embed(user, choice, result, amount, reward, win, gold, spam, scale, luck):
+    embed = discord.Embed()
+    embed.set_author(name="Tung đồng xu")
 
+    result_line = f"Kết quả: {get_emoji(result)} {pretty_side(result)}"
 
-def build_break_request_embed(user, partner_id: str) -> discord.Embed:
-    embed = discord.Embed(
-        title="💔 Yêu cầu chia tay",
-        description=(
-            f"{user.mention} muốn chia tay với <@{partner_id}>.\n"
-            "Nhắn `yes` để đồng ý hoặc `no` để từ chối."
-        ),
-        color=discord.Color.red(),
-    )
-    return embed
-
-
-def build_cancel_embed(user, partner_id: str) -> discord.Embed:
-    embed = discord.Embed(
-        title="✅ Hủy yêu cầu chia tay",
-        description=f"{user.mention} đã hủy yêu cầu chia tay với <@{partner_id}>.",
-        color=discord.Color.green(),
-    )
-    return embed
-
-
-def build_propose_embed(user, target) -> discord.Embed:
-    embed = discord.Embed(
-        title="💘 Tỏ tình",
-        description=f"{user.mention} đã tỏ tình với {target.mention}.\n{target.mention} hãy nhắn `yes` để đồng ý hoặc `no` để từ chối.",
-        color=discord.Color.from_rgb(255, 105, 180),
-    )
-    return embed
-
-
-# ===== LOGIC =====
-async def couple_logic(bot, ctx, target: Optional[Any] = None):
-    data = await load_couple_data()
-    send = _send
-    user = _get_user(ctx)
-    channel = _get_channel(ctx)
-    target = resolve_target_from_ctx(ctx, target)
-
-    if user is None:
-        return await send(ctx, "❌ Không xác định được người dùng.", ephemeral=True if hasattr(ctx, "response") else False)
-
-    if target is None:
-        return await send(
-            ctx,
-            "❌ Hãy mention hoặc reply người bạn muốn tỏ tình.",
-            ephemeral=True if hasattr(ctx, "response") else False,
+    if win:
+        embed.color = 0x2ECC71
+        embed.description = (
+            f"{result_line}\n\n"
+            f"Bạn đã trúng {pretty_side(choice)}\n"
+            f"Đã cộng thêm {reward} gold"
         )
-
-    u1 = str(user.id)
-    u2 = str(target.id)
-
-    if u1 == u2:
-        return await send(ctx, "❌ Bạn không thể tỏ tình với chính mình.")
-
-    if u1 in data and data[u1].get("partner") == u2:
-        return await send(ctx, "❌ Hai bạn đã là một cặp rồi.")
-
-    if u1 in data:
-        return await send(ctx, "❌ Bạn đang có người yêu rồi.")
-
-    if u2 in data:
-        return await send(ctx, "❌ Người này đã có người yêu rồi.")
-
-    await send(ctx, embed=build_propose_embed(user, target))
-
-    def check(m):
-        return m.author.id == target.id and m.channel == channel
-
-    try:
-        while True:
-            msg = await bot.wait_for("message", timeout=60, check=check)
-            content = msg.content.lower().strip()
-
-            if content == "yes":
-                async with _COUPLE_LOCK:
-                    data = await load_couple_data()
-                    if u1 in data or u2 in data:
-                        return await send(ctx, "❌ Một trong hai người đã có trạng thái couple rồi.")
-                    create_couple(data, user.id, target.id)
-                    await save_couple_data(data)
-
-                embed = discord.Embed(
-                    title="💞 Couple thành công",
-                    description=f"{user.mention} và {target.mention} đã chính thức trở thành một cặp đôi.",
-                    color=discord.Color.from_rgb(255, 105, 180),
-                )
-                embed.set_footer(text="Chúc mừng hai bạn!")
-                return await send(ctx, embed=embed)
-
-            if content == "no":
-                embed = discord.Embed(
-                    title="❌ Bị từ chối",
-                    description=f"{target.mention} đã từ chối lời tỏ tình của {user.mention}.",
-                    color=discord.Color.red(),
-                )
-                return await send(ctx, embed=embed)
-
-            await send(ctx, f"❌ {target.mention} chỉ cần nhắn `yes` hoặc `no`.")
-
-    except asyncio.TimeoutError:
-        embed = discord.Embed(
-            title="⌛ Hết thời gian",
-            description=f"{target.mention} đã không phản hồi kịp lời tỏ tình của {user.mention}.",
-            color=discord.Color.orange(),
-        )
-        embed.set_footer(text="Đôi khi chờ đợi cũng là một phần của câu chuyện.")
-        return await send(ctx, embed=embed)
-
-
-async def couple_release_logic(bot, ctx):
-    data = await load_couple_data()
-    send = _send
-    user = _get_user(ctx)
-    channel = _get_channel(ctx)
-
-    if user is None:
-        return await send(ctx, "❌ Không xác định được người dùng.")
-
-    u1 = str(user.id)
-    if u1 not in data:
-        return await send(ctx, "❌ Bạn chưa có người yêu.")
-
-    if check_auto_break(data, u1):
-        await save_couple_data(data)
-        return await send(ctx, "💔 Hai bạn đã tự động chia tay.")
-
-    info = data[u1]
-    u2 = info.get("partner")
-    if not u2 or u2 not in data:
-        remove_couple(data, u1, u2 or "")
-        await save_couple_data(data)
-        return await send(ctx, "❌ Dữ liệu couple bị lỗi và đã được dọn lại.")
-
-    await send(ctx, f"<@{u2}>", embed=build_break_request_embed(user, u2))
-
-    def check(m):
-        return m.author.id == int(u2) and m.channel == channel
-
-    try:
-        while True:
-            msg = await bot.wait_for("message", timeout=60, check=check)
-            content = msg.content.lower().strip()
-
-            if content == "yes":
-                remove_couple(data, u1, u2)
-                await save_couple_data(data)
-                embed = discord.Embed(
-                    title="💔 Đã chia tay",
-                    description=f"{user.mention} và <@{u2}> đã chính thức chia tay.",
-                    color=discord.Color.red(),
-                )
-                return await send(ctx, embed=embed)
-
-            if content == "no":
-                now = iso_now_vn()
-                for uid in (u1, u2):
-                    if uid in data:
-                        data[uid]["pending_break"] = True
-                        data[uid]["break_time"] = now
-                        data[uid]["break_initiator"] = u1
-                await save_couple_data(data)
-
-                embed = discord.Embed(
-                    title="⌛ Yêu cầu đã được lưu",
-                    description=(
-                        f"<@{u2}> không đồng ý chia tay ngay.\n"
-                        "Yêu cầu đã được lưu, sau **7 ngày** hệ thống sẽ tự động chia tay nếu không được hủy."
-                    ),
-                    color=discord.Color.blurple(),
-                )
-                embed.set_footer(text="Còn 7 ngày để suy nghĩ lại.")
-                return await send(ctx, embed=embed)
-
-            await send(ctx, f"❌ <@{u2}> chỉ cần nhắn `yes` hoặc `no`.")
-
-    except asyncio.TimeoutError:
-        now = iso_now_vn()
-        for uid in (u1, u2):
-            if uid in data:
-                data[uid]["pending_break"] = True
-                data[uid]["break_time"] = now
-                data[uid]["break_initiator"] = u1
-        await save_couple_data(data)
-
-        embed = discord.Embed(
-            title="⌛ Hết thời gian phản hồi",
-            description=(
-                f"<@{u2}> đã không trả lời kịp.\n"
-                "Yêu cầu chia tay đã được lưu và sẽ tự động xử lý sau **7 ngày**."
-            ),
-            color=discord.Color.orange(),
-        )
-        embed.set_footer(text="Thời gian sẽ trả lời thay cho lời nói.")
-        return await send(ctx, embed=embed)
-
-
-async def couple_cancel_logic(ctx):
-    data = await load_couple_data()
-    send = _send
-    user = _get_user(ctx)
-    if user is None:
-        return await send(ctx, "❌ Không xác định được người dùng.")
-
-    u1 = str(user.id)
-    if u1 not in data or not data[u1].get("pending_break"):
-        return await send(ctx, "❌ Bạn chưa ở trạng thái chờ chia tay.")
-
-    if data[u1].get("break_initiator") != u1:
-        return await send(ctx, "❌ Bạn không phải người khởi tạo yêu cầu chia tay nên không thể hủy.")
-
-    u2 = data[u1].get("partner")
-    if not u2 or u2 not in data:
-        remove_couple(data, u1, u2 or "")
-        await save_couple_data(data)
-        return await send(ctx, "❌ Dữ liệu couple bị lỗi và đã được dọn lại.")
-
-    for uid in (u1, u2):
-        data[uid]["pending_break"] = False
-        data[uid]["break_time"] = None
-        data[uid]["break_initiator"] = None
-
-    await save_couple_data(data)
-    return await send(ctx, embed=build_cancel_embed(user, u2))
-
-
-async def couple_info_logic(ctx, target: Optional[Any] = None):
-    data = await load_couple_data()
-    send = _send
-    viewer = _get_user(ctx)
-    if viewer is None:
-        return await send(ctx, "❌ Không xác định được người dùng.")
-
-    target = resolve_target_from_ctx(ctx, target)
-    if target is None:
-        target = viewer
-
-    uid = str(target.id)
-    if uid not in data:
-        if uid == str(viewer.id):
-            return await send(ctx, "❌ Bạn chưa có người yêu.")
-        return await send(ctx, "❌ Người này chưa có người yêu.")
-
-    if check_auto_break(data, uid):
-        await save_couple_data(data)
-        return await send(ctx, "💔 Cặp đôi này đã tự động chia tay.")
-
-    info = data[uid]
-    partner = info.get("partner")
-    if not partner or partner not in data:
-        remove_couple(data, uid, partner or "")
-        await save_couple_data(data)
-        return await send(ctx, "❌ Dữ liệu couple bị lỗi và đã được dọn lại.")
-
-    return await send(ctx, embed=build_info_embed(target, info))
-
-
-async def couple_gift_logic(ctx, item: str):
-    couple_data = await load_couple_data()
-    send = _send
-    user = _get_user(ctx)
-    if user is None:
-        return await send(ctx, "❌ Không xác định được người dùng.")
-
-    u1 = str(user.id)
-    if u1 not in couple_data:
-        return await send(ctx, "❌ Bạn chưa có người yêu.")
-
-    if check_auto_break(couple_data, u1):
-        await save_couple_data(couple_data)
-        return await send(ctx, "💔 Hai bạn đã tự động chia tay.")
-
-    if couple_data[u1].get("pending_break"):
-        return await send(ctx, "❌ Hai bạn đang trong trạng thái chờ chia tay, chưa thể tặng quà.")
-
-    u2 = couple_data[u1].get("partner")
-    if not u2 or u2 not in couple_data:
-        remove_couple(couple_data, u1, u2 or "")
-        await save_couple_data(couple_data)
-        return await send(ctx, "❌ Dữ liệu couple bị lỗi và đã được dọn lại.")
-
-    item = str(item).lower().strip()
-    if item == "rose":
-        price, points, name = 1000, 5, "Hoa hồng"
-    elif item == "cake":
-        price, points, name = 2000, 10, "Bánh kem"
+        if spam >= 2:
+            embed.description += f"\n⚠️ Spam → giảm thưởng x{scale:.2f}"
     else:
-        return await send(ctx, "❌ Item không hợp lệ. Chỉ có `rose` hoặc `cake`.")
+        embed.color = 0xE74C3C
+        embed.description = (
+            f"{result_line}\n\n"
+            f"Bạn không trúng mặt nào.\n"
+            f"Đã trừ đi {amount} gold"
+        )
 
-    success = await data_user.remove_gold(u1, price)
-    if not success:
-        return await send(ctx, f"❌ Bạn không đủ gold để mua {name}.")
-
-    couple_data[u1]["points"] = int(couple_data[u1].get("points", 0)) + points
-    couple_data[u2]["points"] = int(couple_data.get(u2, {}).get("points", 0)) + points
-    await save_couple_data(couple_data)
-    return await send(ctx, embed=build_gift_embed(user, u2, name, points))
+    embed.set_footer(text=f"Số dư hiện tại: {gold}")
+    return embed
 
 
-# ===== AUTO BREAK BACKUP =====
-async def start_couple_loop(bot):
-    global _COUPLE_LOOP_STARTED
-    if _COUPLE_LOOP_STARTED:
+# ===== MAIN =====
+async def coinflip_logic(ctx, choice: str, amount: Any):
+    await _defer_if_needed(ctx, ephemeral=isinstance(ctx, discord.Interaction))
+
+    user = _get_user(ctx)
+    uid = user.id
+    choice = str(choice).strip().lower()
+    amount = _safe_int(amount)
+    is_slash = isinstance(ctx, discord.Interaction)
+
+    if choice not in choices:
+        return await _send(ctx, "❌ Chỉ được nhập: Ngua hoặc Sap!", ephemeral=is_slash)
+
+    if amount <= 0:
+        return await _send(ctx, "❌ Gold phải > 0!", ephemeral=is_slash)
+
+    if not await remove_gold(uid, amount):
+        return await _send(ctx, "❌ Không đủ gold!", ephemeral=is_slash)
+
+    delay, scale, spam = spam_control(uid)
+
+    wait_msg = await _send(ctx, embed=build_wait_embed(user))
+    if wait_msg is None:
         return
-    _COUPLE_LOOP_STARTED = True
 
-    async def auto_break():
-        await bot.wait_until_ready()
-        while not bot.is_closed():
-            try:
-                data = await load_couple_data()
-                changed = False
-                processed = set()
+    wait_time = random.uniform(3, 5) + delay
+    await asyncio.sleep(wait_time)
 
-                for u1, info in list(data.items()):
-                    if u1 in processed:
-                        continue
-                    if not isinstance(info, dict):
-                        continue
-                    if not info.get("pending_break"):
-                        continue
+    luck = _safe_int(get_luck(uid))
 
-                    u2 = info.get("partner")
-                    if not u2:
-                        continue
+    weights = {"ngua": 1.0, "sap": 1.0}
+    weights[choice] *= (1 + max(0, (luck - 1) / 100) * 5)
 
-                    bt_time = parse_iso_dt(info.get("break_time"))
-                    if not bt_time:
-                        continue
+    result = random.choices(
+        ["ngua", "sap"],
+        weights=[weights["ngua"], weights["sap"]],
+        k=1,
+    )[0]
 
-                    if now_vn() - bt_time >= timedelta(days=7):
-                        remove_couple(data, u1, u2)
-                        processed.add(u1)
-                        processed.add(str(u2))
-                        changed = True
+    if choice == result:
+        reward = int(amount * 1.7)
+        reward = int(reward * scale)
+        await add_gold(uid, reward)
+        win = True
+    else:
+        reward = 0
+        win = False
 
-                        try:
-                            user1 = bot.get_user(int(u1))
-                            user2 = bot.get_user(int(u2))
-                            if user1:
-                                await user1.send("💔 Mối quan hệ đã tự động kết thúc sau 7 ngày chờ chia tay.")
-                            if user2:
-                                await user2.send("💔 Mối quan hệ đã tự động kết thúc sau 7 ngày chờ chia tay.")
-                        except Exception:
-                            pass
+    gold = await get_gold(uid)
+    embed = build_result_embed(
+        user=user,
+        choice=choice,
+        result=result,
+        amount=amount,
+        reward=reward,
+        win=win,
+        gold=gold,
+        spam=spam,
+        scale=scale,
+        luck=luck,
+    )
 
-                if changed:
-                    await save_couple_data(data)
+    try:
+        if wait_msg:
+            await wait_msg.edit(embed=embed)
+    except Exception:
+        pass
 
-            except Exception as e:
-                print("[COUPLE AUTO ERROR]", e)
-
-            await asyncio.sleep(60)
-
-    bot.loop.create_task(auto_break())
+    print("Loaded coinflip (API mode) has success")
 
 
-print("Loaded couple (API mode) has success")
+def _normalize_side(text: str) -> str:
+    text = str(text).strip().lower()
+    if text in {"ngửa", "ngua", "u", "heads"}:
+        return "ngua"
+    if text in {"sấp", "sap", "x", "tails"}:
+        return "sap"
+    return text
+
+
+async def coinflip_prefix(ctx, choice: str, amount: Any):
+    return await coinflip_logic(ctx, _normalize_side(choice), amount)
+
+
+async def coinflip_slash(interaction, choice: str, amount: Any):
+    return await coinflip_logic(interaction, _normalize_side(choice), amount)
+
+
+print("Loaded coinflip (API mode) has success")

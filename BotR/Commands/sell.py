@@ -1,9 +1,13 @@
-import discord
-import re
+from __future__ import annotations
+
+import asyncio
 import copy
+import re
+from typing import Any, Dict, Optional, Tuple
 
-from Data import data_user
+import discord
 
+from BotR import api_client
 
 # =========================
 # PRICE
@@ -14,8 +18,20 @@ PRICE = {
     "huyen_thoai": 680,
     "truyen_thuyet": 1080,
     "toi_thuong": 1750,
-    "limited": 10000
+    "limited": 10000,
 }
+
+# =========================
+# LOCKS
+# =========================
+USER_LOCKS: Dict[str, asyncio.Lock] = {}
+
+
+def get_lock(user_id: str) -> asyncio.Lock:
+    user_id = str(user_id)
+    if user_id not in USER_LOCKS:
+        USER_LOCKS[user_id] = asyncio.Lock()
+    return USER_LOCKS[user_id]
 
 
 # =========================
@@ -33,13 +49,10 @@ def normalize(text: str) -> str:
 def ensure_user_struct(inv: dict):
     if not isinstance(inv.get("waifus"), dict):
         inv["waifus"] = {}
-
     if not isinstance(inv.get("bag"), dict):
         inv["bag"] = {}
-
     if "bag_item" not in inv or not isinstance(inv.get("bag_item"), dict):
         inv["bag_item"] = {}
-
     inv.setdefault("default_waifu", None)
 
 
@@ -72,6 +85,33 @@ async def _respond(interaction: discord.Interaction, content=None, **kwargs):
         return await interaction.response.send_message(content, **kwargs)
     except discord.InteractionResponded:
         return await interaction.followup.send(content, **kwargs)
+
+
+async def load_waifu_data() -> Dict[str, Any]:
+    data = await api_client.get_waifu()
+    return data if isinstance(data, dict) else {}
+
+
+async def get_inventory(user_id: str) -> Dict[str, Any]:
+    data = await api_client.get_inventory(user_id)
+    return data if isinstance(data, dict) else {}
+
+
+async def update_inventory(user_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(data, dict):
+        data = {}
+    return await api_client.post(f"/inventory/{user_id}/update", data)
+
+
+async def get_user_data(user_id: str) -> Dict[str, Any]:
+    data = await api_client.get_user_data(user_id)
+    return data if isinstance(data, dict) else {}
+
+
+async def update_user_data(user_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(data, dict):
+        data = {"gold": 0, "last_free": 0}
+    return await api_client.post(f"/users/{user_id}/update", data)
 
 
 # =========================
@@ -108,13 +148,13 @@ class ConfirmView(discord.ui.View):
 
         try:
             await interaction.edit_original_response(
-                content=f"💰 Đã bán **{self.waifu_id}**! +{total} gold",
-                view=self
+                content=f"✅ Đã bán **{self.waifu_id}**! +{total} gold",
+                view=self,
             )
         except Exception:
             await interaction.followup.send(
-                f"💰 Đã bán **{self.waifu_id}**! +{total} gold",
-                ephemeral=True
+                f"✅ Đã bán **{self.waifu_id}**! +{total} gold",
+                ephemeral=True,
             )
 
     @discord.ui.button(label="Hủy", style=discord.ButtonStyle.secondary)
@@ -132,7 +172,6 @@ class ConfirmView(discord.ui.View):
 # LOGIC (API VERSION)
 # =========================
 async def sell_logic(interaction, waifu_id: str, source: str = None, amount: int = 1):
-    from Data.api_client import get_inventory, add_item, remove_item
     uid = str(interaction.user.id)
 
     inv = await get_inventory(uid)
@@ -147,7 +186,7 @@ async def sell_logic(interaction, waifu_id: str, source: str = None, amount: int
     if not waifu_id:
         return await _respond(interaction, "❌ Waifu không tồn tại!", ephemeral=True)
 
-    rank = w.get(waifu_id, {}).get("rank")
+    rank = normalize(w.get(waifu_id, {}).get("rank"))
     if not rank:
         return await _respond(interaction, "❌ Không có rank!", ephemeral=True)
 
@@ -155,27 +194,26 @@ async def sell_logic(interaction, waifu_id: str, source: str = None, amount: int
     if price <= 0:
         return await _respond(interaction, "❌ Không có giá!", ephemeral=True)
 
-    bag_count = inv["bag"].get(waifu_id, 0)
+    bag_count = int(inv["bag"].get(waifu_id, 0))
     has_collection = waifu_id in inv["waifus"]
 
     if bag_count <= 0 and not has_collection:
         return await _respond(interaction, "❌ Không có waifu!", ephemeral=True)
 
     async def do_sell():
-        lock = data_user.get_lock(uid)
-
+        lock = get_lock(uid)
         async with lock:
             inv2 = await get_inventory(uid)
             ensure_user_struct(inv2)
 
-            user_data = await data_user.get_user_data(uid)
+            user_data = await get_user_data(uid)
             if not isinstance(user_data, dict):
-                user_data = {}
+                user_data = {"gold": 0, "last_free": 0}
 
             inv_before = copy.deepcopy(inv2)
             user_before = copy.deepcopy(user_data)
 
-            bag_count2 = inv2["bag"].get(waifu_id, 0)
+            bag_count2 = int(inv2["bag"].get(waifu_id, 0))
             has_collection2 = waifu_id in inv2["waifus"]
 
             sold = 0
@@ -188,7 +226,6 @@ async def sell_logic(interaction, waifu_id: str, source: str = None, amount: int
                 inv2["bag"][waifu_id] -= take
                 if inv2["bag"][waifu_id] <= 0:
                     del inv2["bag"][waifu_id]
-
                 sold = take
 
             elif source == "collection":
@@ -215,16 +252,15 @@ async def sell_logic(interaction, waifu_id: str, source: str = None, amount: int
 
             total = sold * price
 
-            # update gold
             current_gold = int(user_data.get("gold", 0) or 0)
             user_data["gold"] = current_gold + total
 
             try:
                 await update_inventory(uid, inv2)
-                await data_user.update_user(uid, user_data)
+                await update_user_data(uid, user_data)
             except Exception:
                 await update_inventory(uid, inv_before)
-                await data_user.update_user(uid, user_before)
+                await update_user_data(uid, user_before)
                 raise
 
             return sold, total
@@ -234,24 +270,23 @@ async def sell_logic(interaction, waifu_id: str, source: str = None, amount: int
         return await interaction.response.send_message(
             f"⚠️ Bán {waifu_id} để nhận {price} gold?",
             view=view,
-            ephemeral=True
+            ephemeral=True,
         )
 
     await interaction.response.defer(thinking=True)
-
     sold, total = await do_sell()
 
-    if interaction.response.is_done():
-        await interaction.followup.send(f"💰 Đã bán {waifu_id}, nhận {total} gold!")
-    else:
-        await interaction.response.send_message(f"💰 Đã bán {waifu_id}, nhận {total} gold!")
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(f"✅ Đã bán {waifu_id}, nhận {total} gold!")
+        else:
+            await interaction.response.send_message(f"✅ Đã bán {waifu_id}, nhận {total} gold!")
+    except Exception:
+        await interaction.followup.send(f"✅ Đã bán {waifu_id}, nhận {total} gold!")
 
 
 # =========================
 # SETUP
 # =========================
 async def setup(bot):
-    pass
-
-
-print("Loaded sell (API) success")
+    print("Loaded sell (API) success")

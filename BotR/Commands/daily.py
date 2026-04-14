@@ -24,42 +24,50 @@ RECORD_LOCK = asyncio.Lock()
 _USER_LOCKS: dict[str, asyncio.Lock] = {}
 
 
-# ===== FILE =====
-def load_record():
-    if not os.path.exists(RECORD_FILE):
-        return []
-    try:
-        with open(RECORD_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            return data if isinstance(data, list) else []
-    except Exception as e:
-        print(f"[ERROR] load_record: {e}")
-        return []
-
-
-def save_record(records):
-    os.makedirs(os.path.dirname(RECORD_FILE), exist_ok=True)
-    temp_file = RECORD_FILE + ".tmp"
-    with open(temp_file, "w", encoding="utf-8") as f:
-        json.dump(records, f, indent=4, ensure_ascii=False)
-    os.replace(temp_file, RECORD_FILE)
-
-
 # ===== API WRAPPERS =====
+import inspect
+from BotR import api_client
+
+RECORD_LOCK = asyncio.Lock()
+_USER_LOCKS: dict[str, asyncio.Lock] = {}
+
 async def _maybe_await(value):
     if inspect.isawaitable(value):
         return await value
     return value
 
+async def load_record():
+    """
+    Load reaction record from API.
+    Accepts either:
+    - {"records": [...]}
+    - [...]  (legacy)
+    """
+    data = await api_client.get_reaction_record()
+
+    if isinstance(data, list):
+        return data
+
+    if isinstance(data, dict):
+        records = data.get("records")
+        if isinstance(records, list):
+            return records
+
+    return []
+
+async def save_record(records):
+    if not isinstance(records, list):
+        records = []
+    await api_client.set_reaction_record({"records": records})
 
 async def _load_user(user_id: str) -> dict:
     fn = getattr(data_user, "get_user_data", None) or getattr(data_user, "get_user", None)
     if not callable(fn):
         return {}
+
     result = fn(user_id)
     data = await _maybe_await(result)
     return data if isinstance(data, dict) else {}
-
 
 async def _save_user(user_id: str, user: dict) -> None:
     fn = getattr(data_user, "save_user", None) or getattr(data_user, "update_user", None)
@@ -73,38 +81,19 @@ async def _save_user(user_id: str, user: dict) -> None:
 
     await _maybe_await(result)
 
-
 async def _add_gold(user_id: str, amount: int) -> None:
     fn = getattr(data_user, "add_gold", None)
     if not callable(fn):
         return
+
     result = fn(user_id, amount)
     await _maybe_await(result)
 
-
 def _get_user_lock(user_id: str) -> asyncio.Lock:
-    fn = getattr(data_user, "get_lock", None)
-    if callable(fn):
-        try:
-            lock = fn(user_id)
-            if lock:
-                return lock
-        except Exception:
-            pass
-
+    user_id = str(user_id)
     if user_id not in _USER_LOCKS:
         _USER_LOCKS[user_id] = asyncio.Lock()
     return _USER_LOCKS[user_id]
-
-
-async def _get_luck(user_id: str) -> float:
-    try:
-        result = get_luck(user_id)
-        value = await _maybe_await(result)
-        return float(value if value is not None else 1.0)
-    except Exception:
-        return 1.0
-
 
 # ===== FORMAT =====
 def format_time(seconds: int) -> str:

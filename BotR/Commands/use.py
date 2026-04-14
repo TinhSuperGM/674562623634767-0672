@@ -1,43 +1,103 @@
-import random
+from __future__ import annotations
+
 import asyncio
+import inspect
+import random
+from typing import Any, Dict, Optional
 
-from Commands.prayer import get_luck
-from Data.level import sync_all
+# --- imports tương thích repo ---
+try:
+    from Commands.prayer import get_luck
+except Exception:
+    from BotR.Commands.prayer import get_luck  # type: ignore
 
-from api_client import get, post  # 🔥 dùng API
+try:
+    from Data.level import sync_all
+except Exception:
+    from BotR.Data.level import sync_all  # type: ignore
+
+try:
+    from BotR import api_client
+except Exception:
+    import api_client  # type: ignore
+
 
 # ===== LOCKS =====
-_user_locks = {}
-_inventory_lock = asyncio.Lock()  # 🔥 giữ nguyên logic lock
+_user_locks: Dict[str, asyncio.Lock] = {}
+_inventory_lock = asyncio.Lock()
 
 
-def get_lock(uid: str):
+def get_lock(uid: str) -> asyncio.Lock:
+    uid = str(uid)
     if uid not in _user_locks:
         _user_locks[uid] = asyncio.Lock()
     return _user_locks[uid]
+
+
+async def maybe_await(value):
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
+async def load_inventory(uid: str) -> Dict[str, Any]:
+    data = await api_client.get_inventory(uid)
+    return data if isinstance(data, dict) else {}
+
+
+async def save_inventory(uid: str, inv: Dict[str, Any]) -> bool:
+    if not isinstance(inv, dict):
+        inv = {}
+    res = await api_client.post(f"/inventory/{uid}/update", inv)
+    return bool(res and res.get("success", True))
+
+
+async def trigger_sync_all() -> None:
+    try:
+        if inspect.iscoroutinefunction(sync_all):
+            await sync_all()
+        else:
+            sync_all()
+    except Exception:
+        pass
 
 
 # ===== MAIN =====
 async def use_logic(user, send, waifu_id=None, item_id=None, qty=1):
     uid = str(user.id)
 
+    try:
+        qty = int(qty)
+    except Exception:
+        return await send("❌ Số lượng không hợp lệ.")
+
     if qty <= 0:
         return await send("❌ Số lượng phải lớn hơn 0.")
 
     async with get_lock(uid):
         async with _inventory_lock:
+            inv = await load_inventory(uid)
 
-            # ===== LOAD INVENTORY TỪ API =====
-            inv = await get(f"/inventory/{uid}") or {}
+            # đảm bảo structure giống JSON cũ
+            if not isinstance(inv, dict):
+                inv = {}
 
-            # đảm bảo structure giống JSON (KHÔNG phá schema)
             inv.setdefault("waifus", {})
             inv.setdefault("bag", {})
             inv.setdefault("bag_item", {})
             inv.setdefault("default_waifu", None)
 
+            if not isinstance(inv["waifus"], dict):
+                inv["waifus"] = {}
+            if not isinstance(inv["bag"], dict):
+                inv["bag"] = {}
+            if not isinstance(inv["bag_item"], dict):
+                inv["bag_item"] = {}
+
             # ===== USE WAIFU =====
             if waifu_id:
+                waifu_id = str(waifu_id)
+
                 if waifu_id not in inv["bag"]:
                     return await send(f"❌ Bạn không có waifu `{waifu_id}`.")
 
@@ -53,31 +113,34 @@ async def use_logic(user, send, waifu_id=None, item_id=None, qty=1):
                 if not inv["default_waifu"]:
                     inv["default_waifu"] = waifu_id
 
-                # ===== SAVE API =====
-                await post(f"/inventory/{uid}/update", {
-                    "data": inv
-                })
+                ok = await save_inventory(uid, inv)
+                if not ok:
+                    return await send("❌ Lưu dữ liệu thất bại.")
 
+                await trigger_sync_all()
                 return await send(f"✨ Đã mở khóa waifu **{waifu_id}**!")
 
             # ===== USE ITEM =====
             if item_id:
-                item_id = item_id.lower()
+                item_id = str(item_id).lower()
 
                 if item_id not in inv["bag_item"]:
                     return await send(f"❌ Bạn không có `{item_id}`.")
 
-                if inv["bag_item"][item_id] < qty:
+                if int(inv["bag_item"][item_id]) < qty:
                     return await send(f"❌ Không đủ `{item_id}`.")
 
                 default_w = inv.get("default_waifu")
-
                 if not default_w or default_w not in inv["waifus"]:
                     return await send("❌ Default waifu lỗi.")
 
-                luck = get_luck(user.id)
-                bonus = min(0.5, max(0, (luck - 1) / 100))
+                luck = await maybe_await(get_luck(user.id))
+                try:
+                    luck = int(luck)
+                except Exception:
+                    luck = 0
 
+                bonus = min(0.5, max(0, (luck - 1) / 100))
                 total_point = 0
 
                 if item_id == "soup":
@@ -94,27 +157,17 @@ async def use_logic(user, send, waifu_id=None, item_id=None, qty=1):
                 else:
                     return await send("❌ Item không hợp lệ.")
 
-                # APPLY
-                inv["waifus"][default_w] += total_point
-                inv["bag_item"][item_id] -= qty
+                inv["waifus"][default_w] = int(inv["waifus"].get(default_w, 0)) + total_point
+                inv["bag_item"][item_id] = int(inv["bag_item"][item_id]) - qty
 
                 if inv["bag_item"][item_id] <= 0:
                     del inv["bag_item"][item_id]
 
-                # ===== SAVE API =====
-                await post(f"/inventory/{uid}/update", {
-                    "data": inv
-                })
+                ok = await save_inventory(uid, inv)
+                if not ok:
+                    return await send("❌ Lưu dữ liệu thất bại.")
 
-                # SYNC SAU
-                try:
-                    if asyncio.iscoroutinefunction(sync_all):
-                        asyncio.create_task(sync_all())
-                    else:
-                        sync_all()
-                except:
-                    pass
-
+                await trigger_sync_all()
                 return await send(
                     f"✅ Dùng **{qty} {item_id}** → **{default_w}** +{total_point} ❤️"
                 )

@@ -1,18 +1,22 @@
+from __future__ import annotations
+
+import asyncio
+import re
+from typing import Any, Dict, Optional
+
 import discord
 from discord.ext import commands
-import json
-import os
-import re
-import asyncio
 
 from Data.data_admin import ADMINS
-from Data import data_user  # ✅ FIX: dùng hệ economy chuẩn
+from Data import data_user
+from BotR import api_client
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATA_DIR = os.path.join(BASE_DIR, "Data")
-
-WAIFU_FILE = os.path.join(DATA_DIR, "waifu_data.json")
-CHANNELS_FILE = os.path.join(DATA_DIR, "phe_duyet_channels.json")
+# =========================================================
+# phe_duyet.py (API mode)
+# - No direct JSON file access
+# - Uses API for waifu database + approval channels
+# - Keeps old command flow and permissions
+# =========================================================
 
 DEFAULT_SUBMISSION_CHANNEL_ID = 1490212883940774059
 DEFAULT_APPROVAL_CHANNEL_ID = 1490214192203038801
@@ -21,7 +25,6 @@ save_lock = asyncio.Lock()
 
 
 # ================= SAFE SEND =================
-
 async def safe_send(target, **kwargs):
     for _ in range(3):
         try:
@@ -32,26 +35,30 @@ async def safe_send(target, **kwargs):
     return None
 
 
-# ================= JSON =================
-
-def load_json(path):
-    if os.path.exists(path):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception as e:
-            print(f"[JSON ERROR] {path}: {e}")
-    return {}
+# ================= API STORAGE =================
+async def load_waifu_db() -> Dict[str, Any]:
+    data = await api_client.get_waifu()
+    return data if isinstance(data, dict) else {}
 
 
-def save_json(path, data):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=4)
+async def save_waifu_db(data: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(data, dict):
+        data = {}
+    return await api_client.set_waifu(data)
+
+
+async def load_channels_db() -> Dict[str, Any]:
+    data = await api_client.get_phe_duyet_channels()
+    return data if isinstance(data, dict) else {}
+
+
+async def save_channels_db(data: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(data, dict):
+        data = {}
+    return await api_client.set_phe_duyet_channels(data)
 
 
 # ================= UTILS =================
-
 def parse_block(content):
     fields = {}
     for line in content.splitlines():
@@ -68,11 +75,11 @@ def valid_id(x):
 def valid_image(url):
     if not url.startswith("https://cdn.discordapp.com/"):
         return False
-
     clean_url = url.split("?")[0]
-    return any(clean_url.lower().endswith(ext) for ext in (
-        ".png", ".jpg", ".jpeg", ".webp", ".gif"
-    ))
+    return any(
+        clean_url.lower().endswith(ext)
+        for ext in (".png", ".jpg", ".jpeg", ".webp", ".gif")
+    )
 
 
 def is_admin(user_id):
@@ -84,23 +91,22 @@ def make_embed(title, desc, color=discord.Color.red()):
 
 
 # ================= CHANNEL =================
-
-def get_guild_channels(guild_id):
-    db = load_json(CHANNELS_FILE)
+async def get_guild_channels(guild_id):
+    db = await load_channels_db()
     cfg = db.get(str(guild_id), {})
     return (
         int(cfg.get("submission_channel_id", DEFAULT_SUBMISSION_CHANNEL_ID)),
-        int(cfg.get("approval_channel_id", DEFAULT_APPROVAL_CHANNEL_ID))
+        int(cfg.get("approval_channel_id", DEFAULT_APPROVAL_CHANNEL_ID)),
     )
 
 
-def set_guild_channels(guild_id, submission_channel_id, approval_channel_id):
-    db = load_json(CHANNELS_FILE)
+async def set_guild_channels(guild_id, submission_channel_id, approval_channel_id):
+    db = await load_channels_db()
     db[str(guild_id)] = {
         "submission_channel_id": int(submission_channel_id),
-        "approval_channel_id": int(approval_channel_id)
+        "approval_channel_id": int(approval_channel_id),
     }
-    save_json(CHANNELS_FILE, db)
+    await save_channels_db(db)
 
 
 async def resolve_channel(bot, cid):
@@ -109,17 +115,16 @@ async def resolve_channel(bot, cid):
         return ch
     try:
         return await bot.fetch_channel(int(cid))
-    except:
+    except Exception:
         return None
 
 
 # ================= EMBED =================
-
 def build_submission_embed(wid, name, bio, image):
     embed = discord.Embed(
         title="Waifu chờ duyệt",
         description=f"Id: {wid}\nname: {name}\nBio: {bio}",
-        color=discord.Color.orange()
+        color=discord.Color.orange(),
     )
     embed.set_image(url=image)
     embed.set_footer(text="Waifu của bạn đang được chờ để duyệt")
@@ -133,10 +138,12 @@ def parse_embed_meta(embed):
     footer_text = getattr(embed.footer, "text", "") or ""
     if footer_text:
         try:
-            data = json.loads(footer_text)
-            if isinstance(data, dict):
-                return data
-        except:
+            data = re.sub(r"\s+", " ", footer_text).strip()
+            if data.startswith("{") and data.endswith("}"):
+                parsed = __import__("json").loads(data)
+                if isinstance(parsed, dict):
+                    return parsed
+        except Exception:
             pass
 
     desc = embed.description or ""
@@ -159,7 +166,6 @@ def parse_embed_meta(embed):
 
 
 # ================= MODAL =================
-
 class RankModal(discord.ui.Modal, title="Nhập Rank Waifu"):
     rank = discord.ui.TextInput(label="Rank", placeholder="VD: thuong / S / SS")
 
@@ -174,8 +180,7 @@ class RankModal(discord.ui.Modal, title="Nhập Rank Waifu"):
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
 
-        waifu_db = load_json(WAIFU_FILE)
-
+        waifu_db = await load_waifu_db()
         wid = self.data["id"]
         name = self.data["name"]
         bio = self.data["bio"]
@@ -191,14 +196,14 @@ class RankModal(discord.ui.Modal, title="Nhập Rank Waifu"):
             "quantity": -1,
             "claimed": 0,
             "Bio": bio,
-            "image": image
+            "image": image,
         }
 
         # ===== SAVE WAIFU =====
         async with save_lock:
-            save_json(WAIFU_FILE, waifu_db)
+            await save_waifu_db(waifu_db)
 
-        # ===== ADD GOLD (FIX CHÍNH) =====
+        # ===== ADD GOLD =====
         try:
             lock = data_user.get_lock(str(self.author_id))
             async with lock:
@@ -214,11 +219,11 @@ class RankModal(discord.ui.Modal, title="Nhập Rank Waifu"):
             embed = discord.Embed(
                 title="Xét duyệt Waifu",
                 description=(
-                    "Chúc mừng, waifu của bạn đã được phê duyệt. "
-                    "Sắp tới đây nó sẽ được thêm vào danh sách waifu của bot. "
+                    "Chúc mừng, waifu của bạn đã được phê duyệt.\n"
+                    "Sắp tới đây nó sẽ được thêm vào danh sách waifu của bot.\n"
                     "Số gold tương ứng của bạn đã được cộng."
                 ),
-                color=discord.Color.green()
+                color=discord.Color.green(),
             )
             embed.add_field(name="ID", value=wid, inline=True)
             embed.add_field(name="Tên", value=name, inline=True)
@@ -228,21 +233,20 @@ class RankModal(discord.ui.Modal, title="Nhập Rank Waifu"):
 
             await safe_send(
                 approval_ch,
-                content=f"Chúc mừng <@{self.author_id}>. Waifu {name} của bạn đã được phê duyệt.",
-                embed=embed
+                content=f"Chúc mừng <@{self.author_id}>.\nWaifu {name} của bạn đã được phê duyệt.",
+                embed=embed,
             )
 
-        try:
-            original_msg = await approval_ch.fetch_message(self.message_id)
-            await original_msg.delete()
-        except:
-            pass
+            try:
+                original_msg = await approval_ch.fetch_message(self.message_id)
+                await original_msg.delete()
+            except Exception:
+                pass
 
         await interaction.followup.send("✅ Đã duyệt!", ephemeral=True)
 
 
 # ================= VIEW =================
-
 class ApproveView(discord.ui.View):
     def __init__(self, cog):
         super().__init__(timeout=None)
@@ -258,7 +262,6 @@ class ApproveView(discord.ui.View):
 
         embed = interaction.message.embeds[0]
         meta = parse_embed_meta(embed)
-
         if not meta:
             return await interaction.response.send_message("❌ Lỗi dữ liệu embed", ephemeral=True)
 
@@ -272,17 +275,16 @@ class ApproveView(discord.ui.View):
             return await interaction.response.send_message("❌ Không tìm thấy user", ephemeral=True)
 
         author_id = int(match.group(1))
-
         guild = interaction.guild
         approval_channel_id = DEFAULT_APPROVAL_CHANNEL_ID
         if guild is not None:
-            _, approval_channel_id = get_guild_channels(guild.id)
+            _, approval_channel_id = await get_guild_channels(guild.id)
 
         data = {
             "id": wid,
             "name": name,
             "bio": bio,
-            "image": image
+            "image": image,
         }
 
         await interaction.response.send_modal(
@@ -296,14 +298,13 @@ class ApproveView(discord.ui.View):
 
         try:
             await interaction.message.delete()
-        except:
+        except Exception:
             pass
 
         await interaction.response.send_message("❌ Đã từ chối!", ephemeral=True)
 
 
 # ================= COG =================
-
 class PheDuyet(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -320,12 +321,11 @@ class PheDuyet(commands.Cog):
         if not content:
             return await safe_send(ctx, content="❌ Sai cú pháp")
 
-        sub_id, app_id = get_guild_channels(ctx.guild.id)
-
+        sub_id, app_id = await get_guild_channels(ctx.guild.id)
         if ctx.channel.id != sub_id:
             return
 
-        waifu_db = load_json(WAIFU_FILE)
+        waifu_db = await load_waifu_db()
         data = parse_block(content)
 
         wid = data.get("id", "").replace(" ", "_")
@@ -354,17 +354,15 @@ class PheDuyet(commands.Cog):
 
         await safe_send(
             ch,
-            content=f"{ctx.author.mention}\n🔔 WAIFU CHỜ DUYỆT\n{admin_mentions}",
+            content=f"{ctx.author.mention}\nWAIFU CHỜ DUYỆT\n{admin_mentions}",
             embed=embed,
-            view=ApproveView(self)
+            view=ApproveView(self),
         )
 
-        await safe_send(ctx, content="📨 Đã gửi chờ duyệt!")
+        await safe_send(ctx, content="Đã gửi chờ duyệt!")
 
 
 # ================= SETUP =================
-
 async def setup(bot):
     await bot.add_cog(PheDuyet(bot))
-
-print("Loaded phê duyệt has success")
+    print("Loaded phê duyệt has success")

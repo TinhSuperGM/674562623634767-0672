@@ -7,7 +7,11 @@ from api_client import get, post  # dùng API thay JSON
 _inv_lock = asyncio.Lock()
 
 
-async def _send_response(interaction: discord.Interaction, content: str, ephemeral: bool = False):
+async def _send_response(
+    interaction: discord.Interaction,
+    content: str,
+    ephemeral: bool = False
+):
     try:
         if interaction.response.is_done():
             await interaction.followup.send(content, ephemeral=ephemeral)
@@ -21,7 +25,6 @@ async def _send_response(interaction: discord.Interaction, content: str, ephemer
             pass
 
 
-# ===== HELPER FIX DEFAULT =====
 def _fix_default_waifu(user_data: Dict[str, Any]) -> None:
     default = user_data.get("default_waifu")
     waifus = user_data.get("waifus", {})
@@ -30,7 +33,6 @@ def _fix_default_waifu(user_data: Dict[str, Any]) -> None:
         return
 
     count = waifus.get(default, 0)
-
     try:
         count = int(count)
     except Exception:
@@ -40,7 +42,6 @@ def _fix_default_waifu(user_data: Dict[str, Any]) -> None:
         user_data["default_waifu"] = None
 
 
-# ===== LOGIC =====
 async def select_waifu_logic(interaction, waifu_id: str):
     if not interaction or not interaction.user:
         return
@@ -50,7 +51,7 @@ async def select_waifu_logic(interaction, waifu_id: str):
     if not waifu_id or not isinstance(waifu_id, str):
         return await _send_response(
             interaction,
-            "❌ Bạn không sở hữu waifu ``!",
+            "❌ Bạn không sở hữu waifu này!",
             ephemeral=True
         )
 
@@ -71,7 +72,7 @@ async def select_waifu_logic(interaction, waifu_id: str):
         if not isinstance(user_data, dict):
             error_msg = f"❌ Bạn không sở hữu waifu `{waifu_id}`!"
         else:
-            # đảm bảo structure (GIỮ NGUYÊN logic cũ)
+            # đảm bảo structure
             if "waifus" not in user_data or not isinstance(user_data["waifus"], dict):
                 user_data["waifus"] = {}
 
@@ -103,7 +104,6 @@ async def select_waifu_logic(interaction, waifu_id: str):
     )
 
 
-# ===== AUTO CLEAN =====
 async def cleanup_default_waifu(uid: str):
     async with _inv_lock:
         try:
@@ -124,7 +124,6 @@ async def cleanup_default_waifu(uid: str):
             pass
 
 
-# ===== SETUP =====
 async def setup(bot):
     pass
 

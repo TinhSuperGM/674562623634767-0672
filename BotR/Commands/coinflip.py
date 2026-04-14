@@ -1,23 +1,21 @@
+from __future__ import annotations
+
 import asyncio
 import random
 import time
-from typing import Dict, Any, Union
+from typing import Any, Dict, Union
 
 import discord
 from discord.ext import commands
 
-from api_client import get, post  # 👈 dùng API
+from api_client import get, post
 from Commands.prayer import get_luck
-
 
 # ===== SIDE =====
 choices = ["ngua", "sap"]
 
-
 # ===== EMOJI =====
-CUSTOM_EMOJI = {
-}
-
+CUSTOM_EMOJI = {}
 UNICODE_EMOJI = {
     "ngua": "<:ngua:1490580499582681088>",
     "sap": "<:sap:1490580475172098178>",
@@ -56,7 +54,6 @@ _SPAM_COUNT: Dict[int, int] = {}
 def spam_control(uid):
     now = time.time()
     last = _LAST_PLAY.get(uid, 0)
-
     diff = now - last
 
     if diff < 2:
@@ -65,12 +62,9 @@ def spam_control(uid):
         _SPAM_COUNT[uid] = 0
 
     _LAST_PLAY[uid] = now
-
     spam = _SPAM_COUNT[uid]
-
     delay = min(spam * 0.5, 2)
     scale = max(1 - spam * 0.1, 0.5)
-
     return delay, scale, spam
 
 
@@ -87,7 +81,7 @@ async def _send(
     ctx: Union[commands.Context, discord.Interaction],
     content=None,
     embed=None,
-    ephemeral: bool = False
+    ephemeral: bool = False,
 ):
     try:
         if isinstance(ctx, discord.Interaction):
@@ -96,19 +90,19 @@ async def _send(
                     await ctx.response.send_message(
                         content=content,
                         embed=embed,
-                        ephemeral=ephemeral
+                        ephemeral=ephemeral,
                     )
                     return await ctx.original_response()
                 return await ctx.followup.send(
                     content=content,
                     embed=embed,
-                    ephemeral=ephemeral
+                    ephemeral=ephemeral,
                 )
             except discord.InteractionResponded:
                 return await ctx.followup.send(
                     content=content,
                     embed=embed,
-                    ephemeral=ephemeral
+                    ephemeral=ephemeral,
                 )
 
         return await ctx.send(content=content, embed=embed)
@@ -137,10 +131,7 @@ async def get_gold(user_id: int) -> int:
 
 # ===== EMBED CHỜ =====
 def build_wait_embed(user):
-    embed = discord.Embed(
-        description="<a:coinflip:1490580450668838962>",
-        color=0xf1c40f
-    )
+    embed = discord.Embed(description="", color=0xF1C40F)
     embed.set_author(name="Tung đồng xu")
     return embed
 
@@ -153,22 +144,23 @@ def build_result_embed(user, choice, result, amount, reward, win, gold, spam, sc
     result_line = f"Kết quả: {get_emoji(result)} {pretty_side(result)}"
 
     if win:
-        embed.color = 0x2ecc71
+        embed.color = 0x2ECC71
         embed.description = (
             f"{result_line}\n\n"
-            f"🎉 Bạn đã trúng {pretty_side(choice)}\n"
-            f"💰 Đã cộng thêm {reward} <a:gold:1492792339436142703>"
+            f"Bạn đã trúng {pretty_side(choice)}\n"
+            f"Đã cộng thêm {reward} gold"
         )
         if spam >= 2:
             embed.description += f"\n⚠️ Spam → giảm thưởng x{scale:.2f}"
     else:
-        embed.color = 0xe74c3c
+        embed.color = 0xE74C3C
         embed.description = (
             f"{result_line}\n\n"
-            f"💔 Bạn không trúng mặt nào. Đã trừ đi {amount} <a:gold:1492792339436142703>"
+            f"Bạn không trúng mặt nào.\n"
+            f"Đã trừ đi {amount} gold"
         )
 
-    embed.set_footer(text=f"Số dư hiện tại: {gold} <a:gold:1492792339436142703>")
+    embed.set_footer(text=f"Số dư hiện tại: {gold}")
     return embed
 
 
@@ -178,10 +170,8 @@ async def coinflip_logic(ctx, choice: str, amount: Any):
 
     user = _get_user(ctx)
     uid = user.id
-
     choice = str(choice).strip().lower()
     amount = _safe_int(amount)
-
     is_slash = isinstance(ctx, discord.Interaction)
 
     if choice not in choices:
@@ -210,13 +200,12 @@ async def coinflip_logic(ctx, choice: str, amount: Any):
     result = random.choices(
         ["ngua", "sap"],
         weights=[weights["ngua"], weights["sap"]],
-        k=1
+        k=1,
     )[0]
 
     if choice == result:
         reward = int(amount * 1.7)
         reward = int(reward * scale)
-
         await add_gold(uid, reward)
         win = True
     else:
@@ -224,7 +213,6 @@ async def coinflip_logic(ctx, choice: str, amount: Any):
         win = False
 
     gold = await get_gold(uid)
-
     embed = build_result_embed(
         user=user,
         choice=choice,
@@ -235,7 +223,7 @@ async def coinflip_logic(ctx, choice: str, amount: Any):
         gold=gold,
         spam=spam,
         scale=scale,
-        luck=luck
+        luck=luck,
     )
 
     try:
@@ -243,6 +231,25 @@ async def coinflip_logic(ctx, choice: str, amount: Any):
             await wait_msg.edit(embed=embed)
     except Exception:
         pass
+
+    print("Loaded coinflip (API mode) has success")
+
+
+def _normalize_side(text: str) -> str:
+    text = str(text).strip().lower()
+    if text in {"ngửa", "ngua", "u", "heads"}:
+        return "ngua"
+    if text in {"sấp", "sap", "x", "tails"}:
+        return "sap"
+    return text
+
+
+async def coinflip_prefix(ctx, choice: str, amount: Any):
+    return await coinflip_logic(ctx, _normalize_side(choice), amount)
+
+
+async def coinflip_slash(interaction, choice: str, amount: Any):
+    return await coinflip_logic(interaction, _normalize_side(choice), amount)
 
 
 print("Loaded coinflip (API mode) has success")
